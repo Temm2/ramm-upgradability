@@ -1,0 +1,435 @@
+<title>Contract Upgradability</title>
+<style>
+  :root {
+    --paper: #F4F5F2;
+    --ink: #1A2332;
+    --accent: #2F6FED;
+    --accent-soft: rgba(47,111,237,0.10);
+    --line: #D8DCE2;
+    --muted: #5C6470;
+    --card: #FFFFFF;
+    --critical: #C1432D;
+    --critical-soft: rgba(193,67,45,0.10);
+    --warn: #B45309;
+    --warn-soft: rgba(180,83,9,0.10);
+    --ok: #2F7D5E;
+    --ok-soft: rgba(47,125,94,0.10);
+    --mono: ui-monospace, "SF Mono", "Cascadia Code", Menlo, Consolas, monospace;
+    --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --paper: #0B0E14; --ink: #E7EAF0; --accent: #5B8DFF; --accent-soft: rgba(91,141,255,0.14);
+      --line: #232A38; --muted: #8891A0; --card: #11151E;
+      --critical: #FF6B52; --critical-soft: rgba(255,107,82,0.14);
+      --warn: #E0A458; --warn-soft: rgba(224,164,88,0.14);
+      --ok: #5FCB9C; --ok-soft: rgba(95,203,156,0.14);
+    }
+  }
+  :root[data-theme="dark"] {
+    --paper: #0B0E14; --ink: #E7EAF0; --accent: #5B8DFF; --accent-soft: rgba(91,141,255,0.14);
+    --line: #232A38; --muted: #8891A0; --card: #11151E;
+    --critical: #FF6B52; --critical-soft: rgba(255,107,82,0.14);
+    --warn: #E0A458; --warn-soft: rgba(224,164,88,0.14);
+    --ok: #5FCB9C; --ok-soft: rgba(95,203,156,0.14);
+  }
+
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; }
+  body {
+    background: var(--paper); color: var(--ink); font-family: var(--sans);
+    font-size: 16px; line-height: 1.6; -webkit-font-smoothing: antialiased;
+  }
+  ::selection { background: var(--accent-soft); color: var(--ink); }
+
+  .topbar {
+    position: sticky; top: 0; z-index: 10;
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 14px 24px; background: var(--paper); border-bottom: 1px solid var(--line);
+  }
+  .wordmark { font-family: var(--mono); font-weight: 700; font-size: 13px; letter-spacing: 0.06em; text-transform: uppercase; color: var(--ink); }
+  .wordmark span { color: var(--accent); }
+  .status-pill {
+    font-family: var(--mono); font-size: 11px; letter-spacing: 0.03em; color: var(--accent);
+    border: 1px solid var(--accent); border-radius: 3px; padding: 4px 9px;
+  }
+
+  main { max-width: 860px; margin: 0 auto; padding: 52px 24px 100px; }
+
+  .doc-title { font-family: var(--mono); font-weight: 700; font-size: 32px; line-height: 1.16; letter-spacing: -0.01em; margin: 0 0 10px; text-wrap: balance; }
+  .doc-sub { font-size: 15px; color: var(--muted); margin: 0 0 4px; max-width: 62ch; }
+  .doc-meta { font-family: var(--mono); font-size: 11.5px; color: var(--muted); margin: 20px 0 0; display: flex; gap: 18px; flex-wrap: wrap; }
+  .doc-meta b { color: var(--ink); font-weight: 700; }
+
+  section { margin: 56px 0 0; }
+  .sec-head { display: flex; align-items: baseline; gap: 12px; margin: 0 0 14px; }
+  .sec-num { font-family: var(--mono); font-size: 12px; color: var(--accent); font-weight: 700; }
+  .sec-title { font-family: var(--mono); font-weight: 700; font-size: 12.5px; text-transform: uppercase; letter-spacing: 0.08em; margin: 0; }
+  .sec-line { flex: 1; height: 1px; background: var(--line); }
+  .sec-desc { font-size: 14.5px; color: var(--muted); margin: -6px 0 22px; max-width: 66ch; }
+
+  p { font-size: 15px; line-height: 1.68; max-width: 68ch; }
+  p.tight { margin: 0 0 14px; }
+  strong { font-weight: 700; }
+  code { font-family: var(--mono); font-size: 0.86em; background: var(--accent-soft); color: var(--accent); border-radius: 3px; padding: 1px 5px; }
+  a { color: var(--accent); }
+
+  .callout {
+    border-left: 3px solid var(--critical); background: var(--critical-soft);
+    padding: 14px 18px; border-radius: 0 6px 6px 0; margin: 20px 0; max-width: 68ch;
+  }
+  .callout p { margin: 0; font-size: 14px; color: var(--ink); }
+  .callout .label { font-family: var(--mono); font-size: 10.5px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--critical); font-weight: 700; display: block; margin-bottom: 6px; }
+
+  /* Contract inventory table */
+  .table-wrap { overflow-x: auto; border: 1px solid var(--line); border-radius: 8px; }
+  table { width: 100%; border-collapse: collapse; font-size: 13.5px; min-width: 640px; }
+  th, td { text-align: left; padding: 11px 14px; border-bottom: 1px solid var(--line); vertical-align: top; }
+  thead th { font-family: var(--mono); font-size: 10.5px; text-transform: uppercase; letter-spacing: 0.05em; color: var(--muted); background: var(--card); font-weight: 700; }
+  tbody tr:last-child td { border-bottom: none; }
+  tbody tr:hover { background: var(--accent-soft); }
+  td.mono, th.mono { font-family: var(--mono); }
+  .status-chip { display: inline-block; font-family: var(--mono); font-size: 10px; text-transform: uppercase; padding: 2px 8px; border-radius: 10px; letter-spacing: 0.03em; white-space: nowrap; }
+  .status-chip.none { background: var(--critical-soft); color: var(--critical); }
+  .status-chip.partial { background: var(--warn-soft); color: var(--warn); }
+
+  /* Incident cards */
+  .incidents { display: grid; gap: 14px; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); margin: 0 0 8px; }
+  .incident { background: var(--card); border: 1px solid var(--line); border-radius: 8px; padding: 16px 18px; }
+  .incident .date { font-family: var(--mono); font-size: 10.5px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.04em; }
+  .incident h4 { font-size: 14.5px; margin: 6px 0 8px; }
+  .incident p { font-size: 13px; color: var(--muted); margin: 0; max-width: none; }
+  .incident .toll { font-family: var(--mono); font-size: 12px; color: var(--critical); margin-top: 10px; display: block; }
+
+  /* Task list */
+  .task {
+    display: grid; grid-template-columns: 44px 1fr; gap: 16px;
+    padding: 24px 0; border-bottom: 1px solid var(--line);
+  }
+  .task:last-child { border-bottom: none; }
+  .task-num { font-family: var(--mono); font-weight: 700; font-size: 20px; color: var(--accent); line-height: 1.3; }
+  .task h3 { font-size: 17px; margin: 0 0 6px; letter-spacing: -0.005em; }
+  .task .goal { font-size: 14px; color: var(--muted); margin: 0 0 14px; max-width: 62ch; }
+  .task .scope { font-size: 14px; margin: 0 0 14px; max-width: 66ch; }
+  .task .scope code { white-space: nowrap; }
+  .accept { list-style: none; margin: 0; padding: 0; display: grid; gap: 7px; }
+  .accept li { font-size: 13.5px; color: var(--ink); display: flex; gap: 9px; align-items: flex-start; max-width: 62ch; }
+  .accept li::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: var(--ok); margin-top: 6px; flex-shrink: 0; }
+  .accept-label { font-family: var(--mono); font-size: 10px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted); margin: 0 0 8px; }
+
+  footer {
+    max-width: 860px; margin: 64px auto 0; padding: 20px 24px 60px;
+    font-family: var(--mono); font-size: 11.5px; color: var(--muted); border-top: 1px solid var(--line);
+  }
+
+  @media (max-width: 640px) {
+    .doc-title { font-size: 25px; }
+    .task { grid-template-columns: 32px 1fr; gap: 10px; }
+    .task-num { font-size: 16px; }
+  }
+</style>
+
+<div class="topbar">
+  <span class="wordmark">RAMM <span>/</span> ENGINEERING</span>
+  <span class="status-pill">BRIEF — CONTRACT UPGRADABILITY</span>
+</div>
+
+<main>
+  <h1 class="doc-title">Contract Upgradability</h1>
+  <p class="doc-sub">
+    Onboarding brief and task list — prepared for the engineer picking up upgradability
+    as their primary workstream. Read the current-state section before touching anything;
+    it explains exactly what "upgrade" means in this codebase today (redeploy everything,
+    by hand) and why that stops working before mainnet.
+  </p>
+  <div class="doc-meta">
+    <span><b>Owner:</b> you</span>
+    <span><b>Prepared:</b> August 2026</span>
+    <span><b>Repo:</b> <code>contracts/</code> + <code>agents/src/valet/</code></span>
+  </div>
+
+  <section>
+    <div class="sec-head"><span class="sec-num">01</span><h2 class="sec-title">Current state</h2><div class="sec-line"></div></div>
+
+    <p class="tight">
+      Nothing in this codebase is upgradeable in the real sense — a logic swap that
+      preserves existing storage at a stable address. Checked directly: every contract
+      imports plain <code>@openzeppelin/contracts</code>, never the
+      <code>-upgradeable</code> variant. There is no <code>Initializable</code>, no
+      <code>UUPSUpgradeable</code>, no proxy of any kind anywhere in <code>contracts/src/</code>.
+    </p>
+    <p class="tight">
+      One piece of indirection exists — <code>RammRegistry.sol</code> — and it's worth
+      understanding precisely, because it's easy to mistake for more than it is. It's a
+      plain <code>Ownable</code> contract holding four addresses (<code>rammToken</code>,
+      <code>redemptionNFT</code>, <code>vestingVault</code>, <code>promoStaking</code>),
+      each swappable via an <code>onlyOwner</code> setter. Every <code>IMPXMarket</code>
+      stores only the registry's own address as <code>immutable</code> and resolves the
+      four singletons fresh on every call — so swapping which contract is authoritative
+      no longer means redeploying all 54 markets. That's real, and it's already shipped.
+    </p>
+    <p class="tight">
+      What it doesn't do: preserve state. Pointing the registry at a new
+      <code>VestingVault</code> gives every market a contract with zero balance and zero
+      tranches — it's changing a signpost to point at a new building, not renovating the
+      one that's standing. That's fine for a fix that doesn't need the old instance's
+      data. It's useless the moment real value is sitting in the contract you need to fix
+      — which, on mainnet, is the normal case, not the exception.
+    </p>
+
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr><th>Contract</th><th>Instances live</th><th class="mono">Upgrade path today</th><th>What a logic fix actually costs</th></tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td><code>IMPXMarket</code></td>
+            <td>54 (41 demo + 13 campaigns)</td>
+            <td><span class="status-chip none">None</span></td>
+            <td>Full redeploy of all 54 + re-authorize on 3 shared contracts + reseed liquidity + reseed redemption codes + repopulate affected wallets. Done twice this session.</td>
+          </tr>
+          <tr>
+            <td><code>PVTToken</code></td>
+            <td>54 (one per market)</td>
+            <td><span class="status-chip none">None</span></td>
+            <td>Same operation as above — deployed and migrated in lockstep with its market.</td>
+          </tr>
+          <tr>
+            <td><code>RammRegistry</code></td>
+            <td>1</td>
+            <td><span class="status-chip none">None</span></td>
+            <td>The registry itself has no upgrade path — if its own logic needs a fix, every market's <code>immutable registry</code> pointer is wrong until they're all redeployed too.</td>
+          </tr>
+          <tr>
+            <td><code>RAMMToken</code> / <code>RedemptionNFT</code> / <code>VestingVault</code> / <code>PromoStaking</code></td>
+            <td>1 each</td>
+            <td><span class="status-chip partial">Swappable, not upgradeable</span></td>
+            <td>Deploy a fresh instance, point the registry at it — but the old instance's balances/tranches/history are abandoned, not migrated. Only viable for a fix that doesn't need prior state.</td>
+          </tr>
+          <tr>
+            <td><code>MockUSDC</code></td>
+            <td>1 (testnet only)</td>
+            <td><span class="status-chip none">None</span></td>
+            <td>Irrelevant on mainnet — real USDC replaces this entirely.</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+
+    <div class="callout">
+      <span class="label">The actual constraint</span>
+      <p>
+        Every contract in this table is owned by a single EOA (<code>DEPLOYER_PRIVATE_KEY</code>)
+        — the same key that would hold upgrade authority under any scheme you design. One
+        compromised or lost key currently controls every admin function in the system.
+        Whatever you build, this is part of the problem, not a footnote to fix later.
+      </p>
+    </div>
+  </section>
+
+  <section>
+    <div class="sec-head"><span class="sec-num">02</span><h2 class="sec-title">Why now, not later</h2><div class="sec-line"></div></div>
+    <p class="sec-desc">Two real operations this month prove the cost, not a hypothetical.</p>
+
+    <div class="incidents">
+      <div class="incident">
+        <span class="date">2026-08-24</span>
+        <h4>RammRegistry migration</h4>
+        <p>
+          Shipped the registry indirection layer above. Required redeploying all 54
+          markets from scratch to adopt the new constructor shape. Missed step, found
+          later: the demo wallet's displayed holdings orphaned against the old
+          addresses — had to be manually repopulated.
+        </p>
+        <span class="toll">54 redeploys · 1 missed migration step</span>
+      </div>
+      <div class="incident">
+        <span class="date">2026-08-26</span>
+        <h4>Bonding curve parameterization</h4>
+        <p>
+          Fixed the curve's inflection point being fixed at supply 500 regardless of a
+          market's real supply cap. Required redeploying all 54 markets again. Missed
+          step, found the hard way: the redemption-code vault was still keyed to the
+          <em>previous</em> migration's addresses — every real redemption returned a
+          blank code until it was reseeded.
+        </p>
+        <span class="toll">54 redeploys · 1 missed migration step</span>
+      </div>
+    </div>
+    <p class="tight" style="margin-top: 18px;">
+      Same root cause both times: redeploying a contract orphans everything keyed to its
+      old address — not just other contracts, but off-chain stores too (a JSON vault, a
+      wallet's displayed balance, an indexer's watch list). Each fix needed its own
+      audit script written after the fact to prove nothing was missed. On testnet, an
+      orphaned demo wallet is a minor annoyance. On mainnet, it's real users' holdings
+      abandoned on a contract nobody's fixing anymore — not an option, not a "migrate
+      later." <strong>This has to be solved before the first mainnet deploy, not after
+      the first mainnet bug.</strong>
+    </p>
+  </section>
+
+  <section>
+    <div class="sec-head"><span class="sec-num">03</span><h2 class="sec-title">The task list</h2><div class="sec-line"></div></div>
+    <p class="sec-desc">Roughly sequential — later tasks assume earlier ones are settled, but read all seven before starting task 1 so early decisions account for what's coming.</p>
+
+    <div class="task">
+      <div class="task-num">1</div>
+      <div>
+        <h3>Map the real blast radius</h3>
+        <p class="goal">Before designing anything, confirm the inventory above against the actual deployed state — don't take this document's word for it.</p>
+        <p class="scope">
+          Run <code>agents/src/scripts/auditRegistry.ts</code>, <code>auditOwnership.ts</code>,
+          and <code>auditVaultAuthorization.ts</code> against the live 54 markets. Read
+          <code>RammRegistry.sol</code> and both migration commits
+          (<code>git log --oneline --all | grep -i registry</code>,
+          <code>git log --oneline --all | grep -i curve</code>) end to end — they're the
+          reference implementation for what a "migration" currently means here, scripts
+          and all.
+        </p>
+        <p class="accept-label">Done when</p>
+        <ul class="accept">
+          <li>You can list, from memory, every off-chain store that got orphaned by the two incidents above and why.</li>
+          <li>You can explain why <code>RammRegistry</code> solves address discovery but not state preservation, to someone who hasn't read this doc.</li>
+        </ul>
+      </div>
+    </div>
+
+    <div class="task">
+      <div class="task-num">2</div>
+      <div>
+        <h3>Choose and justify a proxy pattern for the four singletons</h3>
+        <p class="goal">RAMMToken, RedemptionNFT, VestingVault, PromoStaking — one instance each, real state, the easier half of this problem.</p>
+        <p class="scope">
+          Evaluate UUPS (<code>UUPSUpgradeable</code>, upgrade logic lives in the
+          implementation, cheaper per-deploy) against the Transparent Proxy pattern
+          (upgrade logic lives in a separate <code>ProxyAdmin</code>, slightly more gas
+          per call). Recommend one in writing with the tradeoff stated, not just the
+          choice. Convert these four contracts to their
+          <code>@openzeppelin/contracts-upgradeable</code> equivalents behind
+          <code>ERC1967Proxy</code>. <code>RammRegistry</code> then points at proxy
+          addresses that never change again — its own job shrinks to pure discovery.
+        </p>
+        <p class="accept-label">Done when</p>
+        <ul class="accept">
+          <li>A written recommendation (UUPS vs. Transparent) with the reasoning, reviewed before any code lands.</li>
+          <li>All four contracts deployed behind proxies on a testnet fork, with a forge test proving an upgrade preserves existing balances/tranches/stakes.</li>
+        </ul>
+      </div>
+    </div>
+
+    <div class="task">
+      <div class="task-num">3</div>
+      <div>
+        <h3>Design the per-market upgrade path</h3>
+        <p class="goal">54 instances of IMPXMarket + PVTToken, not one — the actual hard part, and the one with no precedent yet in this codebase.</p>
+        <p class="scope">
+          Evaluate three shapes: (a) EIP-1167 minimal clones per market pointing at one
+          shared UUPS-upgradeable implementation — one upgrade transaction fixes all 54
+          at once; (b) full <code>ERC1967Proxy</code> per market — more gas per deploy,
+          same one-upgrade-fixes-all property; (c) push bonding-curve and fee-split logic
+          into a shared upgradeable "MarketLogic" singleton that thin markets call into,
+          leaving markets themselves non-upgradeable but shrinking what a future bug can
+          actually live in. Recommend one — (a) is the standard answer for
+          many-instances-of-similar-contract and should be the default unless there's a
+          concrete reason against it here.
+        </p>
+        <p class="accept-label">Done when</p>
+        <ul class="accept">
+          <li>A written design doc covering the chosen shape, VALET's <code>createCampaign()</code> changes needed to deploy clones instead of full contracts, and how a single upgrade transaction is proposed/verified/executed.</li>
+          <li>A forge test deploying 3+ market clones, upgrading the shared implementation once, and confirming all 3 reflect the fix with zero per-market redeploys.</li>
+        </ul>
+      </div>
+    </div>
+
+    <div class="task">
+      <div class="task-num">4</div>
+      <div>
+        <h3>Storage-layout discipline</h3>
+        <p class="goal">The single most common way upgradeable contracts silently corrupt themselves — this needs to be a hard rule the team can't accidentally break, not a thing to remember.</p>
+        <p class="scope">
+          Document (and where possible, enforce via CI) the OpenZeppelin storage-gap
+          convention: new state variables only ever appended, never inserted or
+          reordered; reserved <code>uint256[50] private __gap</code> slots on every
+          upgradeable base. Check whether
+          <a href="https://github.com/OpenZeppelin/openzeppelin-foundry-upgrades">OpenZeppelin's Foundry Upgrades plugin</a>
+          fits this project's existing Foundry setup — it validates storage layout
+          compatibility automatically on every proposed upgrade.
+        </p>
+        <p class="accept-label">Done when</p>
+        <ul class="accept">
+          <li>A written rule in the contracts README, plus a CI check (or documented manual step if CI integration isn't feasible yet) that fails a PR introducing a storage-incompatible change.</li>
+        </ul>
+      </div>
+    </div>
+
+    <div class="task">
+      <div class="task-num">5</div>
+      <div>
+        <h3>Move upgrade authority off a bare EOA</h3>
+        <p class="goal">One private key currently controls every admin function in the system — the callout in section 1 isn't a side note, it's the other half of this task.</p>
+        <p class="scope">
+          Propose a Gnosis Safe multisig (minimum viable) or a
+          <code>TimelockController</code> in front of it (better — gives users a window
+          to react to a proposed upgrade before it executes) as the owner of every
+          upgradeable proxy's admin functions and <code>RammRegistry</code>'s
+          <code>onlyOwner</code> setters. Write the runbook: who proposes an upgrade, who
+          signs, how long the delay is, how it's communicated before it executes.
+        </p>
+        <p class="accept-label">Done when</p>
+        <ul class="accept">
+          <li>A Safe (or timelock) deployed on testnet actually holding ownership of the upgraded contracts from tasks 2-3, with a real test upgrade proposed and executed through it end to end.</li>
+          <li>A short runbook doc a non-engineer (e.g. whoever handles the mainnet audit) can review and understand.</li>
+        </ul>
+      </div>
+    </div>
+
+    <div class="task">
+      <div class="task-num">6</div>
+      <div>
+        <h3>The one last full migration</h3>
+        <p class="goal">The 54 live markets predate all of this — they need to move onto the new architecture exactly once, then never again for a logic fix.</p>
+        <p class="scope">
+          Reuse the proven script sequence from the two migrations documented in section
+          2 (<code>deployDemoProducts.ts</code> → <code>migrateCampaignContracts.ts</code>
+          → liquidity reseed → vault-code reseed → the three audit scripts → affected
+          wallet repopulation) as the reference implementation — extend it to deploy
+          clones/proxies per task 3 instead of plain contracts, don't rewrite the
+          off-chain migration logic from scratch. This is deliberately the last task, not
+          the first: doing it before tasks 2-3 land means doing it twice.
+        </p>
+        <p class="accept-label">Done when</p>
+        <ul class="accept">
+          <li>All 54 markets running on the upgradeable architecture, verified by the same three audit scripts plus a new one confirming every market resolves to the correct shared implementation.</li>
+          <li>A real on-chain buy, sell, and redeem against a migrated market, confirmed by hand — same bar the previous two migrations were held to.</li>
+        </ul>
+      </div>
+    </div>
+
+    <div class="task">
+      <div class="task-num">7</div>
+      <div>
+        <h3>Write the upgrade runbook</h3>
+        <p class="goal">So the next person who needs to ship a contract fix doesn't have to re-derive any of this from git history.</p>
+        <p class="scope">
+          One doc, checked into <code>contracts/</code>: the chosen patterns and why,
+          the storage-layout rule, who holds upgrade authority and how a proposal moves
+          through them, and a step-by-step "how to ship a logic fix" walkthrough that
+          ends in one upgrade transaction — not a 54-market redeploy.
+        </p>
+        <p class="accept-label">Done when</p>
+        <ul class="accept">
+          <li>A teammate who wasn't involved in tasks 1-6 can follow the runbook alone to ship a trivial test fix on testnet.</li>
+        </ul>
+      </div>
+    </div>
+  </section>
+
+  <footer>
+    Related: <code>contracts/src/RammRegistry.sol</code> ·
+    <code>agents/src/valet/index.ts</code> (createCampaign) ·
+    memory note <code>feedback-contract-authorization-design</code> (the original problem
+    statement this brief expands on) · Open Items tracker, "No third-party security
+    audit" (a proxy-based rewrite should land before, not after, that audit).
+  </footer>
+</main>

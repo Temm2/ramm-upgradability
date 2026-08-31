@@ -1,0 +1,716 @@
+/**
+ * VALET Agent — Brand operations, campaign orchestration, contract deployment.
+ *
+ * PRD Workflow A:
+ * 1. Brand authenticates via did:web (stub: domain + wallet sig → JWT)
+ * 2. VALET verifies X.402 VCs (stub: server-issued JWT, V2: real VC chain)
+ * 3. Brand configures campaign (product details, inventory, affiliate rate)
+ * 4. VALET deploys PVTToken + IMPXMarket on Base Sepolia
+ * 5. VALET pushes assets to ICP canister (stub: local store)
+ * 6. VALET deposits secret codes into Swiss Subnet vault (stub: AES-256 local)
+ * 7. Gas: accrued from brand revenue payout (stub: brand pre-funds deployer)
+ */
+import crypto from "crypto"
+import jwt from "jsonwebtoken"
+import {
+  createPublicClient,
+  createWalletClient,
+  http,
+  verifyMessage,
+  recoverMessageAddress,
+} from "viem"
+import type { Address, Hex } from "viem"
+import { privateKeyToAccount, generatePrivateKey } from "viem/accounts"
+import { baseSepolia } from "viem/chains"
+import { readFileSync } from "fs"
+import { fileURLToPath } from "url"
+import path from "path"
+
+import { saveCampaign, getCampaign, getCampaignsByBrand, getAllCampaigns } from "./store.js"
+import { deriveCurveParams } from "./curve.js"
+import { depositCodes, claimCode, remainingCodes, readVaultCodes } from "./vault.js"
+import { recordAttribution, getPromoterEarnings, markDisbursed, getPendingAttributions } from "./attributions.js"
+import { storeDpp, getDppByCampaignId } from "./dppStore.js"
+import { signupOrLoginBrand } from "./brands.js"
+import * as matrix from "../state/matrix.js"
+import type { AgentId } from "../state/identity.js"
+import { prewarmAnnotation } from "../state/productAnnotations.js"
+
+// ─── Config ──────────────────────────────────────────────────────────────────
+
+const RPC_URL = process.env.BASE_SEPOLIA_RPC_URL ?? "https://sepolia.base.org"
+const DEPLOYER_KEY = (process.env.DEPLOYER_PRIVATE_KEY ?? "") as Hex
+const JWT_SECRET = process.env.JWT_SECRET ?? "dev-jwt-secret-change-in-prod"
+const USDC_ADDRESS = (process.env.USDC_ADDRESS ?? "") as Address
+const RAMM_TOKEN_ADDRESS = (process.env.RAMM_TOKEN_ADDRESS ?? "") as Address
+const REDEMPTION_NFT_ADDRESS = (process.env.REDEMPTION_NFT_ADDRESS ?? "") as Address
+const VESTING_VAULT_ADDRESS = (process.env.VESTING_VAULT_ADDRESS ?? "") as Address
+const PROMO_STAKING_ADDRESS = (process.env.PROMO_STAKING_ADDRESS ?? "") as Address
+const REGISTRY_ADDRESS = (process.env.REGISTRY_ADDRESS ?? "") as Address
+const ZERO_ADDRESS = "0x0000000000000000000000000000000000000000" as Address
+
+// ─── Contract bytecodes (from compiled Foundry artifacts) ─────────────────────
+
+const __dir = path.dirname(fileURLToPath(import.meta.url))
+
+function loadBytecode(contractName: string): Hex {
+  const artifactPath = path.resolve(
+    __dir,
+    `../../../contracts/out/${contractName}.sol/${contractName}.json`
+  )
+  const artifact = JSON.parse(readFileSync(artifactPath, "utf8"))
+  return artifact.bytecode.object as Hex
+}
+
+// ─── Auth Nonces (in-memory; V2: Redis) ──────────────────────────────────────
+
+const pendingNonces = new Map<string, { nonce: string; expiresAt: number }>()
+
+export function generateAuthChallenge(domain: string): string {
+  const nonce = crypto.randomBytes(16).toString("hex")
+  pendingNonces.set(domain, { nonce, expiresAt: Date.now() + 5 * 60 * 1000 })
+  return nonce
+}
+
+export async function verifyBrandAuth(
+  domain: string,
+  walletAddress: Address,
+  signature: Hex
+): Promise<string> {
+  const entry = pendingNonces.get(domain)
+  if (!entry) throw new Error("No pending challenge for this domain. Request one first.")
+  if (Date.now() > entry.expiresAt) {
+    pendingNonces.delete(domain)
+    throw new Error("Challenge expired. Request a new one.")
+  }
+
+  const message = `RAMM Brand Auth\nDomain: ${domain}\nNonce: ${entry.nonce}`
+  const recovered = await recoverMessageAddress({ message, signature })
+  if (recovered.toLowerCase() !== walletAddress.toLowerCase()) {
+    throw new Error("Signature does not match the provided wallet address.")
+  }
+
+  pendingNonces.delete(domain)
+
+  // Issue JWT — stub for X.402 Verifiable Credential
+  const token = jwt.sign(
+    { did: `did:web:${domain}`, wallet: walletAddress },
+    JWT_SECRET,
+    { expiresIn: "24h" }
+  )
+  return token
+}
+
+export function verifyJWT(token: string): { did: string; wallet: Address } {
+  const payload = jwt.verify(token, JWT_SECRET) as { did: string; wallet: Address }
+  return payload
+}
+
+/**
+ * Simplified signup for the email/password brand UI — no wallet connection
+ * required. Generates (or reuses) a custodial wallet for the brand and issues
+ * the same JWT shape the wallet-signature flow produces, so downstream code
+ * (createCampaign, requireBrandAuth) doesn't need to know which path was used.
+ */
+export function signupBrand(params: { email: string; brandName: string; website: string }): { token: string; did: string; wallet: Address } {
+  const brand = signupOrLoginBrand(params)
+  const token = jwt.sign({ did: brand.did, wallet: brand.wallet }, JWT_SECRET, { expiresIn: "30d" })
+  return { token, did: brand.did, wallet: brand.wallet }
+}
+
+// ─── Campaign Deployment ──────────────────────────────────────────────────────
+
+export interface CreateCampaignParams {
+  brandDid: string
+  brandWallet: Address
+  productName: string
+  symbol: string
+  totalSupply: number
+  basePriceUsdc: number        // price at sigmoid inflection ($, e.g. 1000)
+  // Fee policy — defaults: buy 6%/1%, sell 3%/0.5%
+  buyPromoterRateBps?: number  // e.g. 600 = 6%
+  buyPlatformRateBps?: number  // e.g. 100 = 1%
+  sellPromoterRateBps?: number // e.g. 300 = 3%
+  sellPlatformRateBps?: number // e.g. 50 = 0.5%
+  affiliateRateBps: number     // e.g. 700 = 7%
+  secretCodes: string[]        // promo codes → encrypted vault
+  productDescription: string
+  imageUrl: string
+  checkoutUrl: string          // brand checkout page where shoppers paste their code
+  startsAt?: number           // unix ms — when the drop opens (defaults to now)
+  endsAt?: number             // unix ms — when the drop closes
+  timezone?: string           // IANA zone the brand picked — display only, startsAt is not zone-aware yet
+  dppData?: import("./store.js").DppData
+  // Display / brand-intent metadata — see the matching comment on CampaignRecord.
+  maxPriceUsdc?: number
+  curveShape?: "fast" | "medium" | "slow"
+  targetLocation?: string
+  fulfillmentMethod?: "warehouse" | "3pl"
+  rewardsEnabled?: boolean
+  rewardMode?: "percent" | "fixed"
+  tryOnEnabled?: boolean
+  garmentRequirements?: string
+}
+
+export async function createCampaign(params: CreateCampaignParams): Promise<{
+  campaignId: string
+  pvtAddress: Address
+  marketAddress: Address
+  deployTxHash: string
+}> {
+  if (!DEPLOYER_KEY) throw new Error("DEPLOYER_PRIVATE_KEY not set in agents/.env")
+  if (!USDC_ADDRESS) throw new Error("USDC_ADDRESS not set in agents/.env")
+
+  const account = privateKeyToAccount(DEPLOYER_KEY)
+  const walletClient = createWalletClient({
+    account,
+    chain: baseSepolia,
+    transport: http(RPC_URL),
+  })
+  const publicClient = createPublicClient({
+    chain: baseSepolia,
+    transport: http(RPC_URL),
+  })
+
+  // Generate a dedicated custodial wallet for this campaign.
+  // Receives 7% of each buy and 2% of each sell (promoter distribution).
+  // V2: replace with HSM-backed key management.
+  const campaignPrivateKey = generatePrivateKey()
+  const campaignAccount = privateKeyToAccount(campaignPrivateKey)
+  const campaignWallet = campaignAccount.address
+
+  const pvtBytecode   = loadBytecode("PVTToken")
+  const marketBytecode = loadBytecode("IMPXMarket")
+
+  // Track the nonce ourselves rather than relying on automatic "pending"
+  // lookups for each call — Alchemy's shared RPC nodes can lag a beat
+  // behind each other, so a "pending" count fetched right after the
+  // previous tx was broadcast can come back stale and collide with it
+  // ("replacement transaction underpriced" on the 3rd/transferOwnership tx).
+  let nonce = await publicClient.getTransactionCount({ address: account.address, blockTag: "pending" })
+
+  // 1 — Deploy PVTToken
+  // Explicit gas avoids eth_estimateGas round-trip that can fail on Alchemy
+  // Base Sepolia nodes when the chain is busy or has stale state.
+  let pvtHash: `0x${string}`
+  try {
+    pvtHash = await walletClient.deployContract({
+      abi: PVT_DEPLOY_ABI,
+      bytecode: pvtBytecode,
+      gas: 1_500_000n,
+      nonce: nonce++,
+      args: [
+        params.productName,
+        params.symbol,
+        BigInt(params.totalSupply),
+        account.address,
+      ],
+    })
+  } catch (err) {
+    throw new Error(`[VALET] Step 1 — PVTToken deploy failed: ${String(err)}`)
+  }
+
+  const pvtReceipt = await publicClient.waitForTransactionReceipt({ hash: pvtHash })
+  if (pvtReceipt.status === "reverted") throw new Error("[VALET] Step 1 — PVTToken deploy reverted on-chain")
+  const pvtAddress = pvtReceipt.contractAddress!
+
+  // Fee policy — apply defaults if brand didn't specify
+  const buyPromoterRateBps  = params.buyPromoterRateBps  ?? 600
+  const buyPlatformRateBps  = params.buyPlatformRateBps  ?? 100
+  const sellPromoterRateBps = params.sellPromoterRateBps ?? 300
+  const sellPlatformRateBps = params.sellPlatformRateBps ?? 50
+  // Contract BPS: buy splits must sum to 10000; sell splits ≤ 10000
+  const buyBrandBps    = 10_000 - buyPromoterRateBps - buyPlatformRateBps  // e.g. 9300
+  const buyCampaignBps = buyPromoterRateBps + buyPlatformRateBps            // e.g. 700
+  const sellBrandBps   = sellPromoterRateBps + sellPlatformRateBps          // e.g. 350 total to campaign (split off-chain)
+  const sellCampaignBps = 0  // seller deduction goes to campaignWallet for off-chain distribution
+
+  // Bonding curve shape — was five constants shared by every market
+  // regardless of this campaign's own supply cap or the brand's chosen
+  // fast/medium/slow shape (captured above only for display until now).
+  // See agents/src/valet/curve.ts for the derivation.
+  const curve = deriveCurveParams(
+    params.basePriceUsdc,
+    params.maxPriceUsdc ?? params.basePriceUsdc,
+    params.totalSupply,
+    params.curveShape ?? "medium"
+  )
+
+  // 2 — Deploy IMPXMarket
+  let marketHash: `0x${string}`
+  try {
+    marketHash = await walletClient.deployContract({
+      abi: MARKET_DEPLOY_ABI,
+      bytecode: marketBytecode,
+      gas: 3_000_000n,
+      nonce: nonce++,
+      args: [
+        USDC_ADDRESS,
+        pvtAddress,
+        REGISTRY_ADDRESS || ZERO_ADDRESS,
+        params.brandWallet,
+        campaignWallet,
+        account.address,
+        buyBrandBps,
+        buyCampaignBps,
+        sellBrandBps,
+        sellCampaignBps,
+        buyPromoterRateBps,
+        curve,
+      ],
+    })
+  } catch (err) {
+    throw new Error(`[VALET] Step 2 — IMPXMarket deploy failed: ${String(err)}`)
+  }
+
+  const marketReceipt = await publicClient.waitForTransactionReceipt({ hash: marketHash })
+  if (marketReceipt.status === "reverted") throw new Error("[VALET] Step 2 — IMPXMarket deploy reverted on-chain")
+  const marketAddress = marketReceipt.contractAddress!
+
+  // 3 — Transfer PVT ownership to IMPXMarket so it can mint
+  let transferHash: `0x${string}`
+  try {
+    transferHash = await walletClient.writeContract({
+      address: pvtAddress,
+      abi: PVT_TRANSFER_ABI,
+      functionName: "transferOwnership",
+      gas: 100_000n,
+      nonce: nonce++,
+      args: [marketAddress],
+    })
+  } catch (err) {
+    throw new Error(`[VALET] Step 3 — transferOwnership failed: ${String(err)}`)
+  }
+  const transferReceipt = await publicClient.waitForTransactionReceipt({ hash: transferHash })
+  if (transferReceipt.status === "reverted") throw new Error("[VALET] Step 3 — transferOwnership reverted on-chain")
+
+  // 3a — Authorize this market on the shared RedemptionNFT + RAMMToken + VestingVault
+  // contracts. Without this, redemptions/reward mints/referral credits for this
+  // product would silently or loudly fail forever — this must happen for every
+  // single campaign, not once.
+  if (REDEMPTION_NFT_ADDRESS) {
+    const authNftHash = await walletClient.writeContract({
+      address: REDEMPTION_NFT_ADDRESS,
+      abi: SET_MARKET_AUTHORIZED_ABI,
+      functionName: "setMarketAuthorized",
+      gas: 100_000n,
+      nonce: nonce++,
+      args: [marketAddress, true],
+    })
+    const authNftReceipt = await publicClient.waitForTransactionReceipt({ hash: authNftHash })
+    if (authNftReceipt.status === "reverted") throw new Error("[VALET] Step 3a — RedemptionNFT authorization reverted on-chain")
+  }
+  if (RAMM_TOKEN_ADDRESS) {
+    const authRammHash = await walletClient.writeContract({
+      address: RAMM_TOKEN_ADDRESS,
+      abi: SET_MINTER_AUTHORIZED_ABI,
+      functionName: "setMinterAuthorized",
+      gas: 100_000n,
+      nonce: nonce++,
+      args: [marketAddress, true],
+    })
+    const authRammReceipt = await publicClient.waitForTransactionReceipt({ hash: authRammHash })
+    if (authRammReceipt.status === "reverted") throw new Error("[VALET] Step 3a — RAMMToken authorization reverted on-chain")
+  }
+  if (VESTING_VAULT_ADDRESS) {
+    const authVaultHash = await walletClient.writeContract({
+      address: VESTING_VAULT_ADDRESS,
+      abi: SET_MARKET_AUTHORIZED_ABI,
+      functionName: "setMarketAuthorized",
+      gas: 100_000n,
+      nonce: nonce++,
+      args: [marketAddress, true],
+    })
+    const authVaultReceipt = await publicClient.waitForTransactionReceipt({ hash: authVaultHash })
+    if (authVaultReceipt.status === "reverted") throw new Error("[VALET] Step 3a — VestingVault authorization reverted on-chain")
+  }
+
+  // 3b — Seed buyback liquidity pool (10,000 USDC).
+  // Buy proceeds route out immediately to brandWallet/campaignWallet, so the
+  // contract needs a pre-funded USDC reserve for sellbacks.
+  // On testnet (MockUSDC) we mint directly; on mainnet the deployer must hold USDC.
+  const SEED_USDC = 10_000n * 1_000_000n // 10,000 USDC (6 decimals)
+  // Use a fresh nonce snapshot for the seed block — if any earlier step burned
+  // an extra nonce (e.g. a gas-estimation pre-call), this re-sync keeps us correct.
+  const seedNonce = await publicClient.getTransactionCount({ address: account.address, blockTag: "pending" })
+  let seedN = seedNonce
+  try {
+    // Try testnet mint — silently skip if contract doesn't have mint() (mainnet USDC)
+    const mintHash = await walletClient.writeContract({
+      address: USDC_ADDRESS,
+      abi: MOCK_USDC_MINT_ABI,
+      functionName: "mint",
+      gas: 100_000n,
+      nonce: seedN++,
+      args: [account.address, SEED_USDC],
+    })
+    await publicClient.waitForTransactionReceipt({ hash: mintHash })
+
+    const approveHash = await walletClient.writeContract({
+      address: USDC_ADDRESS,
+      abi: ERC20_ABI,
+      functionName: "approve",
+      gas: 100_000n,
+      nonce: seedN++,
+      args: [marketAddress, SEED_USDC],
+    })
+    await publicClient.waitForTransactionReceipt({ hash: approveHash })
+
+    const depositHash = await walletClient.writeContract({
+      address: marketAddress,
+      abi: DEPOSIT_LIQUIDITY_ABI,
+      functionName: "depositLiquidity",
+      gas: 100_000n,
+      nonce: seedN++,
+      args: [SEED_USDC],
+    })
+    await publicClient.waitForTransactionReceipt({ hash: depositHash })
+  } catch {
+    // Non-fatal: mainnet USDC has no mint(); brand must fund via depositLiquidity manually
+    console.warn(`[VALET] Could not auto-seed liquidity for ${marketAddress} — fund manually via depositLiquidity()`)
+  }
+
+  // 4 — Store campaign metadata (stub for ICP canister)
+  const campaignId = crypto.randomUUID()
+  const dppData = params.dppData ?? { sustainabilityClaims: [], certifications: [], materials: [], mediaAssets: [] }
+
+  saveCampaign({
+    campaignId,
+    brandDid: params.brandDid,
+    brandWallet: params.brandWallet,
+    campaignWallet,
+    campaignPrivateKey,
+    productName: params.productName,
+    symbol: params.symbol,
+    totalSupply: params.totalSupply,
+    basePriceUsdc: params.basePriceUsdc,
+    affiliateRateBps: params.affiliateRateBps,
+    pvtAddress,
+    marketAddress,
+    deployTxHash: marketHash,
+    deployedAt: Date.now(),
+    startsAt: params.startsAt,
+    endsAt: params.endsAt,
+    timezone: params.timezone,
+    status: "active",
+    productDescription: params.productDescription,
+    imageUrl: params.imageUrl,
+    secretCodeCount: params.secretCodes.length,
+    redeemedCount: 0,
+    checkoutUrl: params.checkoutUrl ?? "",
+    dppData,
+    buyPromoterRateBps,
+    buyPlatformRateBps,
+    sellPromoterRateBps,
+    sellPlatformRateBps,
+    maxPriceUsdc: params.maxPriceUsdc,
+    curveShape: params.curveShape,
+    targetLocation: params.targetLocation,
+    fulfillmentMethod: params.fulfillmentMethod,
+    rewardsEnabled: params.rewardsEnabled,
+    rewardMode: params.rewardMode,
+    tryOnEnabled: params.tryOnEnabled,
+    garmentRequirements: params.garmentRequirements,
+  })
+
+  // Pre-warm the vision-based color/style annotation in the background so
+  // shoppers rarely hit the un-annotated gap — never blocks campaign creation.
+  prewarmAnnotation(campaignId, params.imageUrl)
+
+  // 5 — Deposit secret codes into vault (stub for ICP Swiss Subnet)
+  if (params.secretCodes.length > 0) {
+    depositCodes(campaignId, params.secretCodes)
+  }
+
+  // 6 — Issue and store DPP Verifiable Credential (non-blocking — don't fail deploy on VC error)
+  storeDpp(campaignId, dppData, params.brandDid, campaignWallet, campaignPrivateKey)
+    .then(({ cid }) => {
+      const rec = getCampaign(campaignId)
+      if (rec) saveCampaign({ ...rec, dppCid: cid })
+      console.log(`[VALET] DPP VC issued for campaign ${campaignId}, CID: ${cid}`)
+    })
+    .catch((err) => console.warn(`[VALET] DPP VC issuance failed (non-fatal):`, err))
+
+  return { campaignId, pvtAddress, marketAddress, deployTxHash: marketHash }
+}
+
+// ─── Fulfillment (RIDIM will call this) ───────────────────────────────────────
+
+/**
+ * Release one secret promo code for a verified redemption.
+ * V2: RIDIM sends Threshold ECDSA request to ICP Swiss Subnet which
+ * verifies the burn proof before releasing. Here we trust the caller (gateway auth).
+ */
+export function fulfillRedemption(campaignId: string, agentId: AgentId | "UNKNOWN" = "UNKNOWN"): string {
+  const code = claimCode(campaignId)
+  if (!code) throw new Error("No remaining secret codes for this campaign.")
+
+  const rec = getCampaign(campaignId)
+  const redeemedCount = (rec?.redeemedCount ?? 0) + 1
+  const willSellOut = rec != null && redeemedCount >= rec.secretCodeCount
+  matrix.writeFields(
+    "Campaign",
+    campaignId,
+    { redeemedCount, ...(willSellOut ? { status: "sold_out" as const } : {}) },
+    agentId,
+  )
+
+  return code
+}
+
+/**
+ * Deposit additional secret codes for an existing campaign.
+ * Brands use this after launch to top up the vault, or to upload codes
+ * for a campaign that was created without any (e.g. test deploys).
+ */
+// ─── Promoter Attribution ─────────────────────────────────────────────────────
+
+export function attributeBuy(
+  campaignId: string,
+  txHash: string,
+  buyerWallet: string,
+  promoterRef: string,
+  grossUsdc: string,
+) {
+  return recordAttribution(campaignId, txHash, buyerWallet, promoterRef, grossUsdc)
+}
+
+// ─── Campaign Disbursement ────────────────────────────────────────────────────
+
+const USDC_TRANSFER_ABI = [
+  {
+    name: "transfer",
+    type: "function",
+    stateMutability: "nonpayable",
+    inputs: [{ name: "to", type: "address" }, { name: "amount", type: "uint256" }],
+    outputs: [{ name: "", type: "bool" }],
+  },
+  {
+    name: "balanceOf",
+    type: "function",
+    stateMutability: "view",
+    inputs: [{ name: "account", type: "address" }],
+    outputs: [{ name: "", type: "uint256" }],
+  },
+] as const
+
+/**
+ * Disburse pending promoter earnings from the campaignWallet.
+ *
+ * Flow:
+ *  1. Read campaignWallet on-chain USDC balance.
+ *  2. Calculate each promoter's share from pending attributions.
+ *  3. Send USDC to each promoter wallet via campaignWallet private key.
+ *  4. Mark attributions as disbursed.
+ *
+ * Platform share stays in campaignWallet (VALET drains it separately).
+ * Called by brand from dashboard or auto-triggered after sell events.
+ */
+export async function disburseCampaign(campaignId: string): Promise<{
+  disbursements: { promoterRef: string; usdcSent: string }[]
+  totalSent: string
+  remainingBalance: string
+}> {
+  const rec = getCampaign(campaignId)
+  if (!rec) throw new Error("Campaign not found")
+  if (!rec.campaignPrivateKey) throw new Error("No campaign wallet key — cannot disburse")
+
+  const account = privateKeyToAccount(rec.campaignPrivateKey as Hex)
+  const walletClient = createWalletClient({ account, chain: baseSepolia, transport: http(RPC_URL) })
+  const publicClient = createPublicClient({ chain: baseSepolia, transport: http(RPC_URL) })
+
+  if (!USDC_ADDRESS) throw new Error("USDC_ADDRESS not configured")
+
+  // Read on-chain balance
+  const balance = await publicClient.readContract({
+    address: USDC_ADDRESS,
+    abi: USDC_TRANSFER_ABI,
+    functionName: "balanceOf",
+    args: [rec.campaignWallet],
+  }) as bigint
+
+  const earnings = getPromoterEarnings(campaignId, rec.buyPromoterRateBps)
+  if (earnings.length === 0) return { disbursements: [], totalSent: "0", remainingBalance: String(balance) }
+
+  const totalNeeded = earnings.reduce((sum, e) => sum + e.earnedUsdc, 0n)
+  if (totalNeeded > balance) throw new Error(
+    `Insufficient campaignWallet balance: need ${totalNeeded} USDC wei, have ${balance}`
+  )
+
+  const disbursements: { promoterRef: string; usdcSent: string }[] = []
+  let totalSent = 0n
+  let nonce = await publicClient.getTransactionCount({ address: account.address, blockTag: "pending" })
+  const pendingIds = getPendingAttributions(campaignId).map((a) => a.id)
+
+  for (const { promoterRef, earnedUsdc } of earnings) {
+    if (earnedUsdc === 0n) continue
+    const hash = await walletClient.writeContract({
+      address: USDC_ADDRESS,
+      abi: USDC_TRANSFER_ABI,
+      functionName: "transfer",
+      args: [promoterRef as Address, earnedUsdc],
+      nonce: nonce++,
+    })
+    await publicClient.waitForTransactionReceipt({ hash })
+    markDisbursed(pendingIds, hash)
+    disbursements.push({ promoterRef, usdcSent: String(earnedUsdc) })
+    totalSent += earnedUsdc
+  }
+
+  const remaining = balance - totalSent
+  return { disbursements, totalSent: String(totalSent), remainingBalance: String(remaining) }
+}
+
+export function addSecretCodes(campaignId: string, codes: string[]): { added: number; total: number } {
+  const rec = getCampaign(campaignId)
+  if (!rec) throw new Error("Campaign not found")
+
+  // Merge new codes with any already in the vault
+  const existing = readVaultCodes(campaignId)
+  const merged = [...existing, ...codes]
+  depositCodes(campaignId, merged)
+
+  saveCampaign({ ...rec, secretCodeCount: merged.length })
+  return { added: codes.length, total: merged.length }
+}
+
+// ─── Queries ──────────────────────────────────────────────────────────────────
+
+export function listCampaigns(brandDid: string) {
+  return getCampaignsByBrand(brandDid).map((c) => ({
+    ...c,
+    remainingCodes: remainingCodes(c.campaignId),
+  }))
+}
+
+export function getCampaignDetail(campaignId: string) {
+  const c = getCampaign(campaignId)
+  if (!c) return null
+  return { ...c, remainingCodes: remainingCodes(campaignId) }
+}
+
+// Public, no-auth catalog endpoint — must never leak the campaign wallet's
+// private key (campaignPrivateKey), unlike getCampaignDetail/listCampaigns
+// which sit behind requireBrandAuth and are scoped to the owning brand.
+export function listAllCampaigns() {
+  return getAllCampaigns().map(({ campaignPrivateKey: _campaignPrivateKey, ...c }) => ({
+    ...c,
+    remainingCodes: remainingCodes(c.campaignId),
+  }))
+}
+
+export { recordReferralEvent, getReferralStats } from "./referrals.js"
+export { getDppByCampaignId, getDppByCid, getDppByGtin } from "./dppStore.js"
+export { getAttributions, getPromoterEarnings } from "./attributions.js"
+
+// ─── ABIs (deploy-only subset) ────────────────────────────────────────────────
+
+const PVT_DEPLOY_ABI = [
+  {
+    type: "constructor",
+    inputs: [
+      { name: "_productName", type: "string" },
+      { name: "_symbol",      type: "string" },
+      { name: "_supplyCap",   type: "uint256" },
+      { name: "_initialOwner",type: "address" },
+    ],
+    stateMutability: "nonpayable",
+  },
+] as const
+
+const PVT_TRANSFER_ABI = [
+  {
+    name: "transferOwnership",
+    type: "function",
+    stateMutability: "nonpayable",
+    inputs: [{ name: "newOwner", type: "address" }],
+    outputs: [],
+  },
+] as const
+
+// RedemptionNFT and RAMMToken are shared across every product's market, so each
+// newly deployed market must be explicitly authorized on both — see
+// contracts/src/RedemptionNFT.sol / RAMMToken.sol (authorizedMarkets/authorizedMinters).
+const SET_MARKET_AUTHORIZED_ABI = [
+  {
+    name: "setMarketAuthorized",
+    type: "function",
+    stateMutability: "nonpayable",
+    inputs: [{ name: "_market", type: "address" }, { name: "_authorized", type: "bool" }],
+    outputs: [],
+  },
+] as const
+
+const SET_MINTER_AUTHORIZED_ABI = [
+  {
+    name: "setMinterAuthorized",
+    type: "function",
+    stateMutability: "nonpayable",
+    inputs: [{ name: "_minter", type: "address" }, { name: "_authorized", type: "bool" }],
+    outputs: [],
+  },
+] as const
+
+const ERC20_ABI = [
+  {
+    name: "approve",
+    type: "function",
+    stateMutability: "nonpayable",
+    inputs: [{ name: "spender", type: "address" }, { name: "amount", type: "uint256" }],
+    outputs: [{ name: "", type: "bool" }],
+  },
+] as const
+
+const MOCK_USDC_MINT_ABI = [
+  {
+    name: "mint",
+    type: "function",
+    stateMutability: "nonpayable",
+    inputs: [{ name: "to", type: "address" }, { name: "amount", type: "uint256" }],
+    outputs: [],
+  },
+] as const
+
+const DEPOSIT_LIQUIDITY_ABI = [
+  {
+    name: "depositLiquidity",
+    type: "function",
+    stateMutability: "nonpayable",
+    inputs: [{ name: "amount", type: "uint256" }],
+    outputs: [],
+  },
+] as const
+
+// Constructor shrank from 14 args to 11 when the four shared singleton
+// addresses (rammToken/redemptionNFT/vestingVault/promoStaking) moved behind
+// a single RammRegistry — see contracts/src/RammRegistry.sol. Grew back to
+// 12 with the added _curve tuple — see contracts/src/SigmoidMath.sol.
+const MARKET_DEPLOY_ABI = [
+  {
+    type: "constructor",
+    inputs: [
+      { name: "_usdc",              type: "address" },
+      { name: "_pvt",               type: "address" },
+      { name: "_registry",          type: "address" },
+      { name: "_brandWallet",       type: "address" },
+      { name: "_campaignWallet",    type: "address" },
+      { name: "_initialOwner",      type: "address" },
+      { name: "_buyBrandBps",       type: "uint16"  },
+      { name: "_buyCampaignBps",    type: "uint16"  },
+      { name: "_sellBrandBps",      type: "uint16"  },
+      { name: "_sellCampaignBps",   type: "uint16"  },
+      { name: "_promoterBps",       type: "uint16"  },
+      {
+        name: "_curve", type: "tuple",
+        components: [
+          { name: "b",          type: "uint256" },
+          { name: "c",          type: "uint256" },
+          { name: "p",          type: "uint256" },
+          { name: "aPrimary",   type: "uint256" },
+          { name: "aSecondary", type: "uint256" },
+        ],
+      },
+    ],
+    stateMutability: "nonpayable",
+  },
+] as const

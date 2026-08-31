@@ -1,0 +1,456 @@
+<title>RAMM Open Items</title>
+<style>
+  :root {
+    --paper: #F4F5F2;
+    --ink: #1A2332;
+    --accent: #2F6FED;
+    --accent-soft: rgba(47,111,237,0.10);
+    --line: #D8DCE2;
+    --muted: #5C6470;
+    --card: #FFFFFF;
+    --critical: #C1432D;
+    --critical-soft: rgba(193,67,45,0.10);
+    --warn: #B45309;
+    --warn-soft: rgba(180,83,9,0.10);
+    --ok: #2F7D5E;
+    --ok-soft: rgba(47,125,94,0.10);
+    --mono: ui-monospace, "SF Mono", "Cascadia Code", Menlo, Consolas, monospace;
+    --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --paper: #0B0E14;
+      --ink: #E7EAF0;
+      --accent: #5B8DFF;
+      --accent-soft: rgba(91,141,255,0.14);
+      --line: #232A38;
+      --muted: #8891A0;
+      --card: #11151E;
+      --critical: #FF6B52;
+      --critical-soft: rgba(255,107,82,0.14);
+      --warn: #E0A458;
+      --warn-soft: rgba(224,164,88,0.14);
+      --ok: #5FCB9C;
+      --ok-soft: rgba(95,203,156,0.14);
+    }
+  }
+  :root[data-theme="dark"] {
+    --paper: #0B0E14;
+    --ink: #E7EAF0;
+    --accent: #5B8DFF;
+    --accent-soft: rgba(91,141,255,0.14);
+    --line: #232A38;
+    --muted: #8891A0;
+    --card: #11151E;
+    --critical: #FF6B52;
+    --critical-soft: rgba(255,107,82,0.14);
+    --warn: #E0A458;
+    --warn-soft: rgba(224,164,88,0.14);
+    --ok: #5FCB9C;
+    --ok-soft: rgba(95,203,156,0.14);
+  }
+
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; }
+  body {
+    background: var(--paper);
+    color: var(--ink);
+    font-family: var(--sans);
+    font-size: 16px;
+    line-height: 1.6;
+    -webkit-font-smoothing: antialiased;
+  }
+  ::selection { background: var(--accent-soft); color: var(--ink); }
+
+  .topbar {
+    position: sticky; top: 0; z-index: 10;
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 14px 24px;
+    background: var(--paper);
+    border-bottom: 1px solid var(--line);
+  }
+  .wordmark {
+    font-family: var(--mono); font-weight: 700; font-size: 13px;
+    letter-spacing: 0.06em; text-transform: uppercase; color: var(--ink);
+  }
+  .wordmark span { color: var(--accent); }
+  .status-pill {
+    font-family: var(--mono); font-size: 11px; letter-spacing: 0.03em;
+    color: var(--accent); border: 1px solid var(--accent);
+    border-radius: 3px; padding: 4px 9px;
+  }
+
+  main { max-width: 820px; margin: 0 auto; padding: 52px 24px 100px; }
+
+  .doc-title {
+    font-family: var(--mono); font-weight: 700; font-size: 30px;
+    line-height: 1.18; letter-spacing: -0.01em;
+    margin: 0 0 8px; text-wrap: balance;
+  }
+  .doc-sub { font-family: var(--sans); font-size: 14px; color: var(--muted); margin: 0 0 32px; }
+
+  .legend { display: flex; gap: 18px; flex-wrap: wrap; margin: 0 0 44px; }
+  .legend-item { display: flex; align-items: center; gap: 7px; font-size: 12.5px; color: var(--muted); }
+  .dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
+  .dot.critical { background: var(--critical); }
+  .dot.warn { background: var(--warn); }
+  .dot.progress { background: var(--accent); }
+  .dot.ok { background: var(--ok); }
+
+  section { margin: 0 0 48px; }
+  .sec-head { display: flex; align-items: baseline; gap: 12px; margin: 0 0 6px; }
+  .sec-title { font-family: var(--mono); font-weight: 700; font-size: 12px; text-transform: uppercase; letter-spacing: 0.08em; margin: 0; }
+  .sec-line { flex: 1; height: 1px; background: var(--line); }
+  .sec-desc { font-size: 13.5px; color: var(--muted); margin: 0 0 20px; max-width: 66ch; }
+
+  .item {
+    display: grid; grid-template-columns: 20px 1fr; gap: 14px;
+    padding: 16px 0; border-bottom: 1px solid var(--line);
+  }
+  .item:last-child { border-bottom: none; }
+  .item-dot { width: 10px; height: 10px; border-radius: 50%; margin-top: 5px; flex-shrink: 0; }
+  .item-dot.critical { background: var(--critical); }
+  .item-dot.warn { background: var(--warn); }
+  .item-dot.progress { background: var(--accent); }
+  .item-dot.ok { background: var(--ok); }
+  .item-name { font-weight: 700; font-size: 14.5px; margin: 0 0 4px; }
+  .item-body { font-size: 13.5px; color: var(--ink); line-height: 1.55; margin: 0; }
+  .item-body b { font-weight: 700; }
+  .item-tag {
+    display: inline-block; font-family: var(--mono); font-size: 9.5px; text-transform: uppercase;
+    padding: 2px 7px; border-radius: 4px; margin-left: 8px; letter-spacing: 0.03em;
+    position: relative; top: -1px;
+  }
+  .item-tag.critical { background: var(--critical-soft); color: var(--critical); }
+  .item-tag.warn { background: var(--warn-soft); color: var(--warn); }
+  .item-tag.progress { background: var(--accent-soft); color: var(--accent); }
+  .item-tag.ok { background: var(--ok-soft); color: var(--ok); }
+  code {
+    font-family: var(--mono); font-size: 0.85em; background: var(--accent-soft);
+    color: var(--accent); border-radius: 3px; padding: 1px 5px;
+  }
+  a { color: var(--accent); }
+
+  footer {
+    max-width: 820px; margin: 0 auto; padding: 0 24px 60px;
+    font-family: var(--mono); font-size: 11.5px; color: var(--muted);
+    border-top: 1px solid var(--line); padding-top: 20px;
+  }
+
+  @media (max-width: 640px) {
+    .doc-title { font-size: 24px; }
+    .item { grid-template-columns: 16px 1fr; gap: 10px; }
+  }
+</style>
+
+<div class="topbar">
+  <span class="wordmark">RAMM <span>/</span> ENGINEERING</span>
+  <span class="status-pill">STATUS — 20 TRACKED</span>
+</div>
+
+<main>
+  <h1 class="doc-title">Open Items</h1>
+  <p class="doc-sub">Everything genuinely unresolved right now, grouped by area — prepared August 2026</p>
+
+  <div class="legend">
+    <div class="legend-item"><span class="dot critical"></span>Blocks mainnet / real money</div>
+    <div class="legend-item"><span class="dot warn"></span>Real gap, not blocking</div>
+    <div class="legend-item"><span class="dot progress"></span>In progress</div>
+    <div class="legend-item"><span class="dot ok"></span>Built, deliberately not shipped</div>
+  </div>
+
+  <section>
+    <div class="sec-head"><h2 class="sec-title">Architecture — mainnet blockers</h2><div class="sec-line"></div></div>
+    <p class="sec-desc">The two things that genuinely couldn't wait until "later" once real money is involved.</p>
+
+    <div class="item">
+      <div class="item-dot ok"></div>
+      <div>
+        <div class="item-name">Registry layer — built, migrated, verified end-to-end<span class="item-tag ok">Fixed</span></div>
+        <p class="item-body">
+          <code>RammRegistry.sol</code> now sits between every market and the four shared
+          singletons (<code>RAMMToken</code>/<code>RedemptionNFT</code>/<code>VestingVault</code>/
+          <code>PromoStaking</code>) — <code>IMPXMarket</code> stores only the registry's address
+          as <code>immutable</code> and resolves the rest fresh on every call. Fixing any of the
+          four is now one <code>setX()</code> call, not a market redeploy. Migrated all 54 markets
+          (41 demo + 13 campaigns) onto it, verified three independent ways: 62/62 contract tests
+          (including one that swaps a vault mid-test with zero market changes), a new
+          <code>auditRegistry.ts</code> confirming all 54 markets' <code>registry()</code> resolves
+          correctly, and a real buy+sell against a migrated market, both confirmed on-chain.
+        </p>
+      </div>
+    </div>
+
+    <div class="item">
+      <div class="item-dot critical"></div>
+      <div>
+        <div class="item-name">No third-party security audit<span class="item-tag critical">Critical</span></div>
+        <p class="item-body">
+          Only <code>forge test</code> coverage exists (62/62 passing) — that's contract logic,
+          not economic attack surface (self-referral, promoter-cut siphoning, escrow drain paths).
+          Gates mainnet and gates deploying the fulfillment-gating <code>VestingVault</code> change below.
+        </p>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <div class="sec-head"><h2 class="sec-title">Base L3</h2><div class="sec-line"></div></div>
+    <p class="sec-desc">The target execution/settlement layer described in the investor summary §09.</p>
+
+    <div class="item">
+      <div class="item-dot progress"></div>
+      <div>
+        <div class="item-name">Local devnet — a real, specific op-geth bug, not an environment issue<span class="item-tag progress">In progress</span></div>
+        <p class="item-body">
+          Superchain contracts genuinely deployed onto a live Base Sepolia fork via
+          <code>op-deployer</code>; op-node independently recognizes the config as
+          <code>l1_network: base</code>. Ruled out, one by one, with direct evidence rather than
+          guessing:
+        </p>
+        <ul class="decision-list">
+          <li><span class="decision-tag">Ruled out</span> P2P discovery noise, archive vs. full sync mode, a stale L1 anchor (Base Sepolia reorged since the first deploy — redeployed fresh), container networking (a raw JWT-signed call straight to op-geth's own <code>engine_getPayloadV3</code>, bypassing op-node, still times out with zero response).</li>
+          <li><span class="decision-tag">Ruled out</span> op-node's retry behavior interrupting the build — at debug verbosity, found op-geth logging <code>"Payload building already interrupted"</code> on every retry. Tested directly: stopped op-node entirely, gave op-geth 30+ uninterrupted seconds, called <code>getPayload</code> manually — still zero response. The interrupt logs were a real but secondary effect, not the cause.</li>
+          <li><span class="decision-tag">Investigated</span> the Jovian hardfork (activated at genesis, confirmed via <code>op-deployer inspect deploy-config</code>) as the likely underlying trigger — it's the newest, least battle-tested fork in this stack, and Base itself has separately flagged Jovian-adjacent op-geth issues. No override exists in this op-deployer version's "custom" intent type to genesis without it, and no readily available older release predates Jovian's Sepolia activation, so this couldn't be isolated further without building from source.</li>
+        </ul>
+        <p class="item-body">
+          Net: a real, specific, well-evidenced op-geth bug building the very first payload on a
+          Jovian-active custom genesis — not a config or environment problem on this end. Worth
+          filing against <code>ethereum-optimism/op-geth</code> directly. Containers left running.
+        </p>
+      </div>
+    </div>
+
+    <div class="item">
+      <div class="item-dot critical"></div>
+      <div>
+        <div class="item-name">Base has left OP Stack — mainnet migration already happened<span class="item-tag critical">Confirmed, act on it</span></div>
+        <p class="item-body">
+          Update (2026-08-25): the "mainnet date TBD" below is now stale — Base's
+          "Azul" upgrade activated on <strong>mainnet on May 28, 2026, 18:00 UTC</strong>,
+          confirmed directly against Base's own docs. Base Sepolia had already migrated
+          April 20, 2026. Base's own node-upgrade guide is explicit that
+          <code>op-node</code>/<code>op-geth</code>/<code>op-reth</code>/<code>nethermind</code>/
+          <code>kona</code> "must be migrated" — only <code>base-reth-node</code> (execution) +
+          <code>base-consensus</code> (consensus) support Azul going forward. App-layer
+          (chain ID 8453, contract addresses, RPC methods, EVM behavior) is unaffected —
+          this only breaks node-level tooling, which is exactly what this project's local
+          devnet item above runs. Originally announced Feb 18, 2026; consolidates onto one
+          codebase for faster upgrades and full control over the sequencer roadmap. Changes
+          the RaaS vendor item below from a simple bake-off into "confirm they've already
+          migrated to base-consensus/base-reth-node, not just legacy OP-Stack Base" — this
+          is no longer a future risk to plan around, it's a current compatibility
+          requirement for anything targeting Base going forward.
+        </p>
+      </div>
+    </div>
+
+    <div class="item">
+      <div class="item-dot warn"></div>
+      <div>
+        <div class="item-name">RaaS vendor decision<span class="item-tag warn">Open decision</span></div>
+        <p class="item-body">Conduit vs. Caldera — need to confirm support for Base's new unified stack specifically (see above), not just assume compatibility; ~$50/mo testnet, ~$3,000+/mo mainnet either way.</p>
+      </div>
+    </div>
+
+    <div class="item">
+      <div class="item-dot warn"></div>
+      <div>
+        <div class="item-name">ICP Chain Fusion piece unbuilt<span class="item-tag warn">Not started</span></div>
+        <p class="item-body">
+          The canister that independently verifies redemptions instead of trusting RAMM's own
+          backend — a parallel build to the L3 itself, not a dependency of it. No canister, no
+          Chain Fusion integration exists yet.
+        </p>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <div class="sec-head"><h2 class="sec-title">Contracts</h2><div class="sec-line"></div></div>
+
+    <div class="item">
+      <div class="item-dot ok"></div>
+      <div>
+        <div class="item-name">Fulfillment-gating VestingVault — built, tested, deliberately not deployed<span class="item-tag ok">Held</span></div>
+        <p class="item-body">
+          Promoter escrow release now requires brand fulfillment confirmation, not just the 7-day
+          timer. 58/58 tests passing. Not deployed — redeploying it means redeploying all 49+8
+          dependent markets again (see registry item above), and hasn't had a security pass.
+        </p>
+      </div>
+    </div>
+
+    <div class="item">
+      <div class="item-dot ok"></div>
+      <div>
+        <div class="item-name">Bonding curve shape — parameterized, redeployed, live<span class="item-tag ok">Fixed</span></div>
+        <p class="item-body">
+          Was a real gap, not just cosmetic: with a fixed inflection at supply 500 and real demo
+          supply caps of 20-60, the curve never got anywhere near it — price barely moved
+          (~$915-920) across a product's entire real supply range regardless of configured price.
+          <code>SigmoidMath.getPrice/getTotalCost</code> now take a per-market
+          <code>CurveParams</code> struct; <code>deriveCurveParams()</code>
+          (<code>agents/src/valet/curve.ts</code>) turns a brand's actual
+          (minPrice, maxPrice, totalSupply, fast/medium/slow) into it — verified to reproduce the
+          original curve almost exactly at its own reference scale, stay monotonic across 200
+          randomized configs, and correctly span a demo-scale product's configured range instead
+          of ~$5 of total movement. 63/63 contract tests passing. All 54 markets (41 demo + 13
+          campaigns) redeployed onto it — verified 54/54 wired to the registry, 0/54 wrong
+          ownership, 0/54 unauthorized on VestingVault, liquidity funded, redemption vault codes
+          reseeded from the start this time (the exact gap the "orphaned by the registry
+          migration" item below describes — not repeated), and the demo wallet's holdings
+          confirmed live in Folio against the fresh contracts.
+        </p>
+      </div>
+    </div>
+
+    <div class="item">
+      <div class="item-dot warn"></div>
+      <div>
+        <div class="item-name">Secondary market unbuilt<span class="item-tag warn">Not started</span></div>
+        <p class="item-body">The primary→secondary P-SIG AMM curve transition from the longer-term architecture — no contract work started.</p>
+      </div>
+    </div>
+
+    <div class="item">
+      <div class="item-dot warn"></div>
+      <div>
+        <div class="item-name">Promoter voucher DeFi lending — long-term vision only<span class="item-tag warn">Not started</span></div>
+        <p class="item-body">From the confidential HLD's longer-term roadmap. Not scoped for near-term work.</p>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <div class="sec-head"><h2 class="sec-title">App / product</h2><div class="sec-line"></div></div>
+
+    <div class="item">
+      <div class="item-dot warn"></div>
+      <div>
+        <div class="item-name">Virtual try-on is a preview, not the real thing<span class="item-tag warn">Blocked externally</span></div>
+        <p class="item-body">Wired up in-app via SpreeAI as a preview experience; the real generation API needs a signed partner agreement that hasn't closed.</p>
+      </div>
+    </div>
+
+    <div class="item">
+      <div class="item-dot warn"></div>
+      <div>
+        <div class="item-name">No push notifications<span class="item-tag warn">Not started</span></div>
+        <p class="item-body">Redemption-window urgency shows in-app only. Alerting when a window is about to close needs mobile push infra that doesn't exist yet.</p>
+      </div>
+    </div>
+
+    <div class="item">
+      <div class="item-dot warn"></div>
+      <div>
+        <div class="item-name">Coinbase Wallet withdraw is a plain transfer, not the Coinbase SDK<span class="item-tag warn">Deliberate, for now</span></div>
+        <p class="item-body"><code>COINBASE_PAY_APP_ID</code> is unset. Current "withdraw to Coinbase Wallet" is a real on-chain USDC transfer to an external address — functionally correct, but not the polished SDK-based flow.</p>
+      </div>
+    </div>
+
+    <div class="item">
+      <div class="item-dot warn"></div>
+      <div>
+        <div class="item-name">Campaign/account data lives in flat files, not a database<span class="item-tag warn">Real gap</span></div>
+        <p class="item-body"><code>agents/data/*.json</code> — fine at current testnet scale, already flagged in the codebase as needing a real database (or decentralized storage) layer before real-volume launch.</p>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <div class="sec-head"><h2 class="sec-title">Agent layer</h2><div class="sec-line"></div></div>
+
+    <div class="item">
+      <div class="item-dot progress"></div>
+      <div>
+        <div class="item-name">SHOPi search — real semantic ranking built, waiting on a Voyage API key<span class="item-tag progress">In progress</span></div>
+        <p class="item-body">
+          The client's local scorer (hand-tuned synonym/keyword matching against Claude Vision
+          annotations) is unchanged and stays the fast first pass. The gateway's fallback search
+          now does real cosine-similarity ranking over Voyage AI embeddings instead of a regex
+          category/heel/flat pre-filter — the piece that actually broke as the catalog grew, since
+          a brand-uploaded product in a category nobody hard-coded was previously invisible.
+          Degrades cleanly with <code>VOYAGE_API_KEY</code> unset (verified both paths live): falls
+          straight back to the old regex behavior, nothing spent, nothing broken. Needs a real key
+          in <code>agents/.env</code> to actually turn on.
+        </p>
+      </div>
+    </div>
+
+    <div class="item">
+      <div class="item-dot ok"></div>
+      <div>
+        <div class="item-name">Gasless-migration gap — found and fixed this session<span class="item-tag ok">Fixed</span></div>
+        <p class="item-body">
+          Sell/Transfer/Redeem/the test faucet were all silently still on the old direct-EOA-pays-gas
+          path. Fixed and verified end-to-end against real deployed contracts. Listed here as a
+          pattern to watch for elsewhere, not as still-open — the second time this exact
+          "migrated most call sites, missed a few" shape has shown up.
+        </p>
+      </div>
+    </div>
+
+    <div class="item">
+      <div class="item-dot ok"></div>
+      <div>
+        <div class="item-name">Redemption codes orphaned by the registry migration — found and fixed this session<span class="item-tag ok">Fixed</span></div>
+        <p class="item-body">
+          Same shape of bug as the gasless-migration gap above, one layer down: redeploying the 41
+          demo products gave every one a fresh PVT address, but <code>agents/data/vault.json</code>'s
+          redemption codes were still keyed by the old ones. Every real redemption since the migration
+          completed correctly on-chain but came back with a blank code — 0 of 41 products had codes
+          under their current address. Reseeded (41/41 now seeded) and Folio now silently retries the
+          vault for any redeemed-but-codeless PVT on screen focus, not just when the shopper manually
+          taps "Get my code" — verified live against a real stuck record. Third time this exact
+          "redeploy orphans anything keyed by the old address" shape has shown up this session
+          (holdings display, on-chain authorization, now an off-chain data store) — worth a checklist
+          pass over every address-keyed store before any future bulk redeploy.
+        </p>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <div class="sec-head"><h2 class="sec-title">Housekeeping</h2><div class="sec-line"></div></div>
+
+    <div class="item">
+      <div class="item-dot ok"></div>
+      <div>
+        <div class="item-name"><code>docs/</code> is now tracked in git<span class="item-tag ok">Fixed</span></div>
+        <p class="item-body">The investor summary, Base L3 plan, and this document all now travel with the repo instead of living only on one machine.</p>
+      </div>
+    </div>
+
+    <div class="item">
+      <div class="item-dot warn"></div>
+      <div>
+        <div class="item-name">Alchemy RPC key hit its monthly cap — stopgap in place, billing still needs a real fix<span class="item-tag warn">Needs billing action</span></div>
+        <p class="item-body">
+          Discovered 2026-08-24: the shared Alchemy key powering every on-chain call in the live
+          app returned HTTP 429 "Monthly capacity limit exceeded" — an app-wide outage, not a
+          devnet-only issue. Fixed in code: reads now go through Base's free public RPC, and the
+          gasless bundler was moved onto Pimlico's own endpoint (which also fixed a second,
+          previously-latent gas-estimation bug Alchemy had been silently masking). Both fixes are
+          verified working end-to-end. But a free public RPC has real rate limits of its own — it
+          already forced two bulk migration scripts to add retry/backoff — so this needs someone
+          to actually sort out Alchemy's billing/plan for a durable fix, not just live on the stopgap.
+        </p>
+      </div>
+    </div>
+
+    <div class="item">
+      <div class="item-dot warn"></div>
+      <div>
+        <div class="item-name">Not yet on Base mainnet<span class="item-tag warn">Deployment step</span></div>
+        <p class="item-body">Everything runs on Base Sepolia with test funds. Moving to mainnet is a deployment step, not a redesign — but gated on the audit item above.</p>
+      </div>
+    </div>
+  </section>
+</main>
+
+<footer>
+  Companion to the <a href="https://claude.ai/code/artifact/b2232f61-f750-4ba9-a590-3b79e29da052">Base L3 Deployment Plan</a> and the
+  <a href="https://claude.ai/code/artifact/862f5a6d-f81b-4fa7-a9b1-0f9f3bf59965">RAMM Technical Implementation Summary</a> —
+  same "RAMM Engineering" doc family, kept in sync as items close.
+</footer>
