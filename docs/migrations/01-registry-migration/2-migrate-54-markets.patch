@@ -1,0 +1,519 @@
+commit 1f7ba2b2b3c0316550163a0ae38a05482c97c797
+Author: admin <admin@MacBook-Pro-de-admin.local>
+Date:   Mon Aug 24 14:32:07 2026 -0400
+
+    feat: migrate all 54 markets onto RammRegistry, verified end-to-end
+    
+    Completes the registry migration started earlier this session:
+    deployed RammRegistry (0x7a5138a6371aa21c384d100fa7d7ef2be2c552d4) pointed
+    at the existing, unchanged RAMMToken/RedemptionNFT/VestingVault/
+    PromoStaking, then redeployed PVTToken+IMPXMarket for all 41 demo
+    products and 13 brand campaigns against the new registry-aware
+    constructor.
+    
+    Found and fixed a real bug in the process, not just re-ran the old
+    scripts: deployDemoProducts.ts only wrote productContracts.ts once at
+    the very end of the loop. The first migration attempt hit Base's public
+    RPC rate limit (a shared, free endpoint under real load from 40+
+    sequential product deployments) and crashed after 38/41 products had
+    already deployed on-chain — with zero record of their addresses saved
+    anywhere. Fixed properly before re-running: viem's http() transport now
+    retries with backoff (retryCount: 10, retryDelay: 3000) on all five bulk
+    scripts (deployDemoProducts, migrateCampaignContracts,
+    seedMarketLiquidity, seedCampaignLiquidity, auditOwnership), and
+    productContracts.ts/campaigns.json now checkpoint-write after every
+    single product/campaign instead of once at the end.
+    
+    (Deliberately did NOT add "skip already-deployed" resume logic —
+    productContracts.ts always has *some* entry per product from whichever
+    deployment generation last succeeded, so treating "key present" as
+    "done" would silently skip products that genuinely need redeploying.
+    The incremental-write fix protects against losing a crash's progress;
+    it doesn't try to make re-runs skip real work.)
+    
+    Verified for real, not just via the migration scripts' own log lines
+    (this session already proved once that a logged "success" can lie —
+    see the 31/49 silent transferOwnership failure from earlier):
+    - auditOwnership.ts: 0/54 products have wrong PVTToken ownership
+    - auditRegistry.ts (new): RammRegistry's own four pointers correct,
+      and all 54 markets' registry() call resolves to the right address
+    - Real end-to-end buy + sell against a freshly-migrated market
+      (agatha), both transactions confirmed on-chain
+    
+    Also updated app/constants/env.ts's legacy single PVT_ADDRESS/
+    MARKET_ADDRESS fallback to the fresh agatha addresses.
+    
+    Co-Authored-By: Claude Sonnet 5 <noreply@anthropic.com>
+
+diff --git a/agents/src/scripts/auditOwnership.ts b/agents/src/scripts/auditOwnership.ts
+index ab51c83..ef516ed 100644
+--- a/agents/src/scripts/auditOwnership.ts
++++ b/agents/src/scripts/auditOwnership.ts
+@@ -34,7 +34,7 @@ function loadCampaignContracts(): { id: string; pvtAddress: Address; marketAddre
+ }
+ 
+ async function main() {
+-  const publicClient = createPublicClient({ chain: baseSepolia, transport: http(RPC_URL) })
++  const publicClient = createPublicClient({ chain: baseSepolia, transport: http(RPC_URL, { retryCount: 10, retryDelay: 3000 }) })
+   const all = [...loadDemoContracts(), ...loadCampaignContracts()]
+   console.log(`Auditing ${all.length} products...\n`)
+ 
+diff --git a/agents/src/scripts/auditRegistry.ts b/agents/src/scripts/auditRegistry.ts
+new file mode 100644
+index 0000000..7e449b9
+--- /dev/null
++++ b/agents/src/scripts/auditRegistry.ts
+@@ -0,0 +1,91 @@
++/**
++ * Audits every product's IMPXMarket.registry() to confirm it equals
++ * REGISTRY_ADDRESS, and that RammRegistry's four pointers match the expected
++ * shared-contract addresses. Doesn't trust the migration scripts' own "wired
++ * up" log lines — this session already proved once (the 31/49 silent
++ * transferOwnership failure) that a logged success can lie.
++ */
++import "dotenv/config"
++import { createPublicClient, http } from "viem"
++import type { Address } from "viem"
++import { baseSepolia } from "viem/chains"
++import { readFileSync } from "fs"
++import { fileURLToPath } from "url"
++import path from "path"
++
++const __dir = path.dirname(fileURLToPath(import.meta.url))
++const RPC_URL = process.env.BASE_SEPOLIA_RPC_URL!
++const REGISTRY_ADDRESS = process.env.REGISTRY_ADDRESS as Address
++const RAMM_ADDRESS = process.env.RAMM_TOKEN_ADDRESS as Address
++const NFT_ADDRESS = process.env.REDEMPTION_NFT_ADDRESS as Address
++const VAULT_ADDRESS = process.env.VESTING_VAULT_ADDRESS as Address
++const STAKING_ADDRESS = process.env.PROMO_STAKING_ADDRESS as Address
++
++const MARKET_REGISTRY_ABI = [{
++  name: "registry", type: "function", stateMutability: "view",
++  inputs: [], outputs: [{ name: "", type: "address" }],
++}] as const
++
++const REGISTRY_READ_ABI = [
++  { name: "rammToken", type: "function", stateMutability: "view", inputs: [], outputs: [{ name: "", type: "address" }] },
++  { name: "redemptionNFT", type: "function", stateMutability: "view", inputs: [], outputs: [{ name: "", type: "address" }] },
++  { name: "vestingVault", type: "function", stateMutability: "view", inputs: [], outputs: [{ name: "", type: "address" }] },
++  { name: "promoStaking", type: "function", stateMutability: "view", inputs: [], outputs: [{ name: "", type: "address" }] },
++] as const
++
++function loadDemoContracts(): { id: string; marketAddress: Address }[] {
++  const src = readFileSync(path.resolve(__dir, "../../../app/constants/productContracts.ts"), "utf8")
++  const out: { id: string; marketAddress: Address }[] = []
++  const re = /"([\w-]+)":\s*\{\s*pvtAddress:\s*"0x[0-9a-fA-F]+",\s*marketAddress:\s*"(0x[0-9a-fA-F]+)"\s*\}/g
++  for (const m of src.matchAll(re)) out.push({ id: m[1], marketAddress: m[2] as Address })
++  return out
++}
++
++function loadCampaignContracts(): { id: string; marketAddress: Address }[] {
++  const data = JSON.parse(readFileSync(path.resolve(__dir, "../../data/campaigns.json"), "utf8"))
++  return data.map((c: any) => ({ id: c.productName, marketAddress: c.marketAddress }))
++}
++
++async function main() {
++  if (!REGISTRY_ADDRESS) throw new Error("REGISTRY_ADDRESS not set in agents/.env")
++  const publicClient = createPublicClient({ chain: baseSepolia, transport: http(RPC_URL, { retryCount: 10, retryDelay: 3000 }) })
++
++  console.log("=== RammRegistry's own pointers ===")
++  const [rammToken, redemptionNFT, vestingVault, promoStaking] = await Promise.all([
++    publicClient.readContract({ address: REGISTRY_ADDRESS, abi: REGISTRY_READ_ABI, functionName: "rammToken" }),
++    publicClient.readContract({ address: REGISTRY_ADDRESS, abi: REGISTRY_READ_ABI, functionName: "redemptionNFT" }),
++    publicClient.readContract({ address: REGISTRY_ADDRESS, abi: REGISTRY_READ_ABI, functionName: "vestingVault" }),
++    publicClient.readContract({ address: REGISTRY_ADDRESS, abi: REGISTRY_READ_ABI, functionName: "promoStaking" }),
++  ])
++  const checks: [string, string, string][] = [
++    ["rammToken", rammToken as string, RAMM_ADDRESS],
++    ["redemptionNFT", redemptionNFT as string, NFT_ADDRESS],
++    ["vestingVault", vestingVault as string, VAULT_ADDRESS],
++    ["promoStaking", promoStaking as string, STAKING_ADDRESS],
++  ]
++  let registryOk = true
++  for (const [name, actual, expected] of checks) {
++    const ok = actual.toLowerCase() === expected.toLowerCase()
++    if (!ok) registryOk = false
++    console.log(`  ${ok ? "OK" : "MISMATCH"}  ${name}: ${actual} ${ok ? "" : `(expected ${expected})`}`)
++  }
++
++  const all = [...loadDemoContracts(), ...loadCampaignContracts()]
++  console.log(`\n=== ${all.length} markets — registry() pointer ===`)
++  const bad: string[] = []
++  for (const { id, marketAddress } of all) {
++    try {
++      const reg = await publicClient.readContract({ address: marketAddress, abi: MARKET_REGISTRY_ABI, functionName: "registry" })
++      const ok = (reg as string).toLowerCase() === REGISTRY_ADDRESS.toLowerCase()
++      if (!ok) { bad.push(id); console.log(`  MISMATCH  ${id}: registry()=${reg}`) }
++    } catch (e) {
++      bad.push(id)
++      console.log(`  ERROR  ${id}: ${e instanceof Error ? e.message.split("\n")[0] : String(e)}`)
++    }
++  }
++
++  console.log(`\n${bad.length === 0 && registryOk ? "ALL GOOD" : "PROBLEMS FOUND"} — ${all.length - bad.length}/${all.length} markets correctly wired to the registry`)
++  if (bad.length > 0) console.log("Bad:", bad)
++}
++
++main().catch((e) => { console.error("FAILED:", e); process.exit(1) })
+diff --git a/agents/src/scripts/deployDemoProducts.ts b/agents/src/scripts/deployDemoProducts.ts
+index f9ae380..3897348 100644
+--- a/agents/src/scripts/deployDemoProducts.ts
++++ b/agents/src/scripts/deployDemoProducts.ts
+@@ -165,21 +165,57 @@ const SET_MINTER_AUTHORIZED_ABI = [{
+ 
+ // ── Main ──────────────────────────────────────────────────────────────────────
+ 
++const outPath = path.resolve(__dir, "../../../app/constants/productContracts.ts")
++
++function writeResults(results: Record<string, { pvtAddress: string; marketAddress: string }>) {
++  const lines = [
++    `// Auto-generated by agents/src/scripts/deployDemoProducts.ts — do not edit by hand`,
++    `// Deployed on Base Sepolia ${new Date().toISOString()}`,
++    `export const PRODUCT_CONTRACTS: Record<string, { pvtAddress: \`0x\${string}\`; marketAddress: \`0x\${string}\` }> = {`,
++    ...Object.entries(results).map(([id, c]) =>
++      `  "${id}": { pvtAddress: "${c.pvtAddress}", marketAddress: "${c.marketAddress}" },`
++    ),
++    `}`,
++    ``,
++    `export function getProductContracts(productId: string) {`,
++    `  return PRODUCT_CONTRACTS[productId]`,
++    `}`,
++  ]
++  writeFileSync(outPath, lines.join("\n"))
++}
++
+ async function main() {
+   const account    = privateKeyToAccount(DEPLOYER_KEY)
+-  const walletClient = createWalletClient({ account, chain: baseSepolia, transport: http(RPC_URL) })
+-  const publicClient = createPublicClient({ chain: baseSepolia, transport: http(RPC_URL) })
++  // Bulk 40+-product runs against a shared/rate-limited RPC (e.g. Base's free
++  // public endpoint) will hit transient "over rate limit" errors partway
++  // through — retryCount/retryDelay here rides those out instead of crashing
++  // the whole run. This is exactly what took down the first attempt at this
++  // migration: 38/41 products succeeded on-chain but the crash happened
++  // before results were ever written to disk (see writeResults below, now
++  // called after every product instead of once at the end).
++  const transport = http(RPC_URL, { retryCount: 10, retryDelay: 3000 })
++  const walletClient = createWalletClient({ account, chain: baseSepolia, transport })
++  const publicClient = createPublicClient({ chain: baseSepolia, transport })
+ 
+   const pvtBytecode    = loadBytecode("PVTToken")
+   const marketBytecode = loadBytecode("IMPXMarket")
+ 
+   const SEED = 10_000n * 1_000_000n  // 10,000 USDC
+ 
++  // NOTE: deliberately no "skip if already in productContracts.ts" resume
++  // logic — that file's existing entries could be from an older deployment
++  // generation (e.g. pre-registry-migration markets), not necessarily a
++  // crashed run of *this* script. Treating "key present" as "done" would
++  // silently skip products that actually still need redeploying. Every run
++  // of this script deploys fresh contracts for every product in PRODUCTS;
++  // only writeResults()'s incremental checkpointing is meant to survive a
++  // crash (so a retry-run can start from a truthful base file), not
++  // selective per-product skipping.
+   const results: Record<string, { pvtAddress: string; marketAddress: string }> = {}
+ 
+   let nonce = await publicClient.getTransactionCount({ address: account.address, blockTag: "pending" })
+   console.log(`Deployer: ${account.address}  starting nonce: ${nonce}`)
+-  console.log(`Deploying ${PRODUCTS.length} products...\n`)
++  console.log(`Deploying ${PRODUCTS.length} product(s)...\n`)
+ 
+   for (const product of PRODUCTS) {
+     console.log(`[${product.id}] Deploying PVTToken (${product.symbol}, cap=${product.supplyCap})...`)
+@@ -273,26 +309,10 @@ async function main() {
+     }
+ 
+     results[product.id] = { pvtAddress, marketAddress }
++    writeResults(results)  // checkpoint after every product, not just at the end
+     console.log()
+   }
+ 
+-  // ── Output productContracts.ts ────────────────────────────────────────────
+-
+-  const outPath = path.resolve(__dir, "../../../app/constants/productContracts.ts")
+-  const lines = [
+-    `// Auto-generated by agents/src/scripts/deployDemoProducts.ts — do not edit by hand`,
+-    `// Deployed on Base Sepolia ${new Date().toISOString()}`,
+-    `export const PRODUCT_CONTRACTS: Record<string, { pvtAddress: \`0x\${string}\`; marketAddress: \`0x\${string}\` }> = {`,
+-    ...Object.entries(results).map(([id, c]) =>
+-      `  "${id}": { pvtAddress: "${c.pvtAddress}", marketAddress: "${c.marketAddress}" },`
+-    ),
+-    `}`,
+-    ``,
+-    `export function getProductContracts(productId: string) {`,
+-    `  return PRODUCT_CONTRACTS[productId]`,
+-    `}`,
+-  ]
+-  writeFileSync(outPath, lines.join("\n"))
+   console.log(`\nWrote ${outPath}`)
+ 
+   // Also print env vars for reference
+diff --git a/agents/src/scripts/deployRegistry.ts b/agents/src/scripts/deployRegistry.ts
+new file mode 100644
+index 0000000..7c82f19
+--- /dev/null
++++ b/agents/src/scripts/deployRegistry.ts
+@@ -0,0 +1,68 @@
++/**
++ * One-time: deploy RammRegistry, pointed at the existing (unchanged)
++ * RAMMToken/RedemptionNFT/VestingVault/PromoStaking addresses.
++ *
++ * Usage: cd agents && npx tsx src/scripts/deployRegistry.ts
++ * Then copy the logged address into REGISTRY_ADDRESS in agents/.env and
++ * app/constants/env.ts before running deployDemoProducts.ts / migrateCampaignContracts.ts.
++ */
++import "dotenv/config"
++import { createPublicClient, createWalletClient, http } from "viem"
++import type { Address, Hex } from "viem"
++import { privateKeyToAccount } from "viem/accounts"
++import { baseSepolia } from "viem/chains"
++import { readFileSync } from "fs"
++import { fileURLToPath } from "url"
++import path from "path"
++
++const __dir = path.dirname(fileURLToPath(import.meta.url))
++const RPC_URL = process.env.BASE_SEPOLIA_RPC_URL!
++const DEPLOYER_KEY = process.env.DEPLOYER_PRIVATE_KEY as Hex
++const RAMM_ADDRESS = process.env.RAMM_TOKEN_ADDRESS as Address
++const NFT_ADDRESS = process.env.REDEMPTION_NFT_ADDRESS as Address
++const VAULT_ADDRESS = process.env.VESTING_VAULT_ADDRESS as Address
++const STAKING_ADDRESS = process.env.PROMO_STAKING_ADDRESS as Address
++
++function loadBytecode(name: string): Hex {
++  const p = path.resolve(__dir, `../../../contracts/out/${name}.sol/${name}.json`)
++  return JSON.parse(readFileSync(p, "utf8")).bytecode.object as Hex
++}
++
++const REGISTRY_DEPLOY_ABI = [{
++  type: "constructor",
++  inputs: [
++    { name: "_initialOwner", type: "address" },
++    { name: "_rammToken", type: "address" },
++    { name: "_redemptionNFT", type: "address" },
++    { name: "_vestingVault", type: "address" },
++    { name: "_promoStaking", type: "address" },
++  ],
++  stateMutability: "nonpayable",
++}] as const
++
++async function main() {
++  const account = privateKeyToAccount(DEPLOYER_KEY)
++  const walletClient = createWalletClient({ account, chain: baseSepolia, transport: http(RPC_URL) })
++  const publicClient = createPublicClient({ chain: baseSepolia, transport: http(RPC_URL) })
++  const bytecode = loadBytecode("RammRegistry")
++
++  console.log("Deployer:", account.address)
++  console.log("Pointing registry at:")
++  console.log("  RAMMToken:     ", RAMM_ADDRESS)
++  console.log("  RedemptionNFT: ", NFT_ADDRESS)
++  console.log("  VestingVault:  ", VAULT_ADDRESS)
++  console.log("  PromoStaking:  ", STAKING_ADDRESS)
++
++  const hash = await walletClient.deployContract({
++    abi: REGISTRY_DEPLOY_ABI, bytecode,
++    args: [account.address, RAMM_ADDRESS, NFT_ADDRESS, VAULT_ADDRESS, STAKING_ADDRESS],
++  })
++  const receipt = await publicClient.waitForTransactionReceipt({ hash })
++  if (receipt.status !== "success") throw new Error("RammRegistry deploy reverted on-chain")
++
++  console.log("\nRammRegistry deployed:", receipt.contractAddress)
++  console.log("\nAdd this to agents/.env and app/constants/env.ts:")
++  console.log(`REGISTRY_ADDRESS=${receipt.contractAddress}`)
++}
++
++main().catch((e) => { console.error("FAILED:", e); process.exit(1) })
+diff --git a/agents/src/scripts/migrateCampaignContracts.ts b/agents/src/scripts/migrateCampaignContracts.ts
+index 6370f28..1762b55 100644
+--- a/agents/src/scripts/migrateCampaignContracts.ts
++++ b/agents/src/scripts/migrateCampaignContracts.ts
+@@ -124,11 +124,15 @@ interface CampaignRecord {
+ }
+ 
+ async function main() {
++  // retryCount/retryDelay ride out transient "over rate limit" errors from
++  // shared/free RPC endpoints (see the same fix in deployDemoProducts.ts —
++  // that script's first run crashed mid-migration on exactly this).
++  const transport = http(RPC_URL, { retryCount: 10, retryDelay: 3000 })
+   const deployer = privateKeyToAccount(DEPLOYER_KEY)
+   const buyer = privateKeyToAccount(process.env.BUYER_PRIVATE_KEY as Hex)
+-  const deployerWallet = createWalletClient({ account: deployer, chain: baseSepolia, transport: http(RPC_URL) })
+-  const buyerWallet = createWalletClient({ account: buyer, chain: baseSepolia, transport: http(RPC_URL) })
+-  const publicClient = createPublicClient({ chain: baseSepolia, transport: http(RPC_URL) })
++  const deployerWallet = createWalletClient({ account: deployer, chain: baseSepolia, transport })
++  const buyerWallet = createWalletClient({ account: buyer, chain: baseSepolia, transport })
++  const publicClient = createPublicClient({ chain: baseSepolia, transport })
+ 
+   const pvtBytecode = loadBytecode("PVTToken")
+   const marketBytecode = loadBytecode("IMPXMarket")
+@@ -249,10 +253,14 @@ async function main() {
+     // brand-set demo state, and got silently undone. Status is independent of
+     // the redemption counter; leave it exactly as the brand set it.
+ 
++    // Checkpoint after every campaign, not just once at the end — a crash
++    // partway through a bulk run (rate limit, RPC blip) shouldn't lose every
++    // already-migrated campaign's new addresses. Exactly what happened to
++    // deployDemoProducts.ts's first run before this same fix landed there.
++    writeFileSync(CAMPAIGNS_PATH, JSON.stringify(campaigns, null, 2))
+     console.log()
+   }
+ 
+-  writeFileSync(CAMPAIGNS_PATH, JSON.stringify(campaigns, null, 2))
+   console.log(`Wrote ${CAMPAIGNS_PATH}`)
+   console.log("\nDone.")
+ }
+diff --git a/agents/src/scripts/seedCampaignLiquidity.ts b/agents/src/scripts/seedCampaignLiquidity.ts
+index 783e6e5..12f2f04 100644
+--- a/agents/src/scripts/seedCampaignLiquidity.ts
++++ b/agents/src/scripts/seedCampaignLiquidity.ts
+@@ -39,9 +39,12 @@ async function main() {
+   const amountUsdc = parseFloat(process.argv[2] ?? "5000")
+   const amount = parseUnits(amountUsdc.toString(), 6)
+ 
++  // retryCount/retryDelay ride out transient "over rate limit" errors from
++  // shared/free RPC endpoints (see the same fix in deployDemoProducts.ts).
++  const transport = http(RPC_URL, { retryCount: 10, retryDelay: 3000 })
+   const account = privateKeyToAccount(BUYER_KEY)
+-  const walletClient = createWalletClient({ account, chain: baseSepolia, transport: http(RPC_URL) })
+-  const publicClient = createPublicClient({ chain: baseSepolia, transport: http(RPC_URL) })
++  const walletClient = createWalletClient({ account, chain: baseSepolia, transport })
++  const publicClient = createPublicClient({ chain: baseSepolia, transport })
+ 
+   const campaigns: { productName: string; marketAddress: Address }[] = JSON.parse(readFileSync(CAMPAIGNS_PATH, "utf8"))
+   console.log(`Checking ${campaigns.length} campaign markets, seeding to $${amountUsdc} USDC each if below $${MIN_BALANCE_USDC}...`)
+diff --git a/agents/src/scripts/seedMarketLiquidity.ts b/agents/src/scripts/seedMarketLiquidity.ts
+index 737b7c2..1f3f9cd 100644
+--- a/agents/src/scripts/seedMarketLiquidity.ts
++++ b/agents/src/scripts/seedMarketLiquidity.ts
+@@ -68,9 +68,13 @@ async function main() {
+   const amountUsdc = parseFloat(amountArg ?? "5000")
+   const amount = parseUnits(amountUsdc.toString(), 6)
+ 
++  // retryCount/retryDelay ride out transient "over rate limit" errors from
++  // shared/free RPC endpoints across a 40+-market bulk run (see the same fix
++  // in deployDemoProducts.ts for why this matters).
++  const transport = http(RPC_URL, { retryCount: 10, retryDelay: 3000 })
+   const account = privateKeyToAccount(BUYER_KEY)
+-  const walletClient = createWalletClient({ account, chain: baseSepolia, transport: http(RPC_URL) })
+-  const publicClient = createPublicClient({ chain: baseSepolia, transport: http(RPC_URL) })
++  const walletClient = createWalletClient({ account, chain: baseSepolia, transport })
++  const publicClient = createPublicClient({ chain: baseSepolia, transport })
+ 
+   const entries = Object.entries(loadProductContracts())
+   console.log(`Checking ${entries.length} demo product markets, seeding to $${amountUsdc} USDC each if below $${MIN_BALANCE_USDC}...`)
+diff --git a/app/constants/env.ts b/app/constants/env.ts
+index 1fe4f2f..586c8dc 100644
+--- a/app/constants/env.ts
++++ b/app/constants/env.ts
+@@ -22,11 +22,14 @@ export const ENV = {
+   // Coinbase Pay — get App ID from https://portal.cdp.coinbase.com
+   COINBASE_PAY_APP_ID: '',
+ 
+-  // MVP4 contracts — Base Sepolia (7-param constructor, per-campaign wallet revenue split)
+-  // TODO: redeploy with `forge script Deploy.s.sol` and update addresses below
++  // MVP4 contracts — Base Sepolia. PVT_ADDRESS/MARKET_ADDRESS below are just
++  // the legacy single-product fallback (first demo product, "agatha") for
++  // any call site that doesn't pass a per-product ContractOverrides — every
++  // real product/campaign address lives in productContracts.ts / campaigns.json.
++  // Redeployed 2026-08-24 for the RammRegistry migration (see RammRegistry.sol).
+   USDC_ADDRESS:            '0x8C21822D8937489EC6f46717B411B9FA987F785E' as `0x${string}`,
+-  PVT_ADDRESS:             '0x441C9f650e9941A966dCb5b35926A4cF36389d26' as `0x${string}`,
+-  MARKET_ADDRESS:          '0xC2A24998043ABE43f702f785251f6169138f7876' as `0x${string}`,
++  PVT_ADDRESS:             '0xeb00b545aa430a7b13b506c9578384fce1155c39' as `0x${string}`,
++  MARKET_ADDRESS:          '0x2e7ce85ce402fd48a9ff19f930d8974d4d46a671' as `0x${string}`,
+   RAMM_TOKEN_ADDRESS:      '0x6717cAFBb59c8B365c2e41d71A12B398f51cF9A9' as `0x${string}`,
+   REDEMPTION_NFT_ADDRESS:  '0x6710F697AE813dA3aC33AA881D91148b49739349' as `0x${string}`,
+   PROMO_STAKING_ADDRESS:   '0x581699489Cc9b0aEF261F6e89dEa79A297330F75' as `0x${string}`,
+diff --git a/app/constants/productContracts.ts b/app/constants/productContracts.ts
+index 0e62680..28ef649 100644
+--- a/app/constants/productContracts.ts
++++ b/app/constants/productContracts.ts
+@@ -1,47 +1,47 @@
+ // Auto-generated by agents/src/scripts/deployDemoProducts.ts — do not edit by hand
+-// Deployed on Base Sepolia 2026-08-05T19:57:13.618Z
++// Deployed on Base Sepolia 2026-08-24T17:57:07.475Z
+ export const PRODUCT_CONTRACTS: Record<string, { pvtAddress: `0x${string}`; marketAddress: `0x${string}` }> = {
+-  "agatha": { pvtAddress: "0x976c3fc1a9a942acff0a4912e56cd096a93bbc59", marketAddress: "0x00caf7d43de3dd624035d60f6c1b915d3f4f6549" },
+-  "anaconda": { pvtAddress: "0x9c3fde60050f1a893eea9427b1da4a104e74e730", marketAddress: "0xf975bd80a63341de236a477bad9b56dddd25f227" },
+-  "annabelle": { pvtAddress: "0x383236cf681ddf210ca894b57f2dca6ac6807668", marketAddress: "0x38d81269b32f319a381e8fb2826bb3e89a5f2363" },
+-  "arisa": { pvtAddress: "0x3e34b39501a3acd09873d63cd48f388a354ebc61", marketAddress: "0xb91966f6e478c507327cd2c42357ba8159dbe03f" },
+-  "astride": { pvtAddress: "0x536088a899f7add1b249bc83ca888399d08bf88b", marketAddress: "0xc47d84d98984ea5fdd5ed338aa42957554e8966f" },
+-  "aurora": { pvtAddress: "0x5ee29397e791fc005aa338223fbaa55c1072d6cd", marketAddress: "0x705698594392f5cc2fe724a05c1b69e7d6405385" },
+-  "autumn": { pvtAddress: "0x042ebca5b6f1c27c8b310e26a46f0de4f155d75e", marketAddress: "0xf7b99f326e3dac57873eb8d297e9b979eda835db" },
+-  "bette": { pvtAddress: "0xd3c9186dcc1ab726d814fcd4d9a2feee6415ddcd", marketAddress: "0x4af12d82c9d467a4b05c5e834a432576a42ac978" },
+-  "bit-of-history": { pvtAddress: "0x44356f745a4e7033fb879b9d155cc126ef1ee84a", marketAddress: "0xcebc4caacad7e1e8f678c3097cf89c6841138c98" },
+-  "calla": { pvtAddress: "0x989e969f5f2da45fb9f36250eba22fc46967b1ed", marketAddress: "0x39ab82b2f85abbc78cc9abc91789ea65244ec483" },
+-  "declaration-of-love": { pvtAddress: "0x80c1744729da48bc949b9c389ee4aa15ec2890f1", marketAddress: "0xb23512071919e2e650d83f14d0bb760cdeb1f4c8" },
+-  "demivika": { pvtAddress: "0x51c22b2fb85cc5072c90e200b30ae1d52765ba9c", marketAddress: "0xefef8360f46f0db066a447522253a8f99427baca" },
+-  "diana": { pvtAddress: "0xf0fc32757a9d6725819247fefd476f8a40faf1fa", marketAddress: "0xdc7be88bff207a1a55449a4cdb78b55cdfa516bc" },
+-  "double-bracelet": { pvtAddress: "0x6c8976fa94a42251dbc19a87dd564c5ad5a4c2ec", marketAddress: "0x23e61852f717c76540525a26b784a38229e72e9f" },
+-  "eiffelia": { pvtAddress: "0x6dfd4513ddf40a21f432b448eca77088150b8356", marketAddress: "0xde178ac222f488978f81f0bcddf325f195ab9815" },
+-  "eivissa": { pvtAddress: "0x329bf03320dc99e51ffe84eb6996df486c01ccae", marketAddress: "0x08d6fcc282c6b85330853152d2452734643eea2c" },
+-  "eleonora": { pvtAddress: "0xe2977e791b010d3f8a9aa63b1aba1ab2cfb07ded", marketAddress: "0x29ca48abf55af0012477fcdc4dc5129c969c90d0" },
+-  "eterry-9-black": { pvtAddress: "0xb85c6076ab93ea5907407963c3b8d03f8fba4458", marketAddress: "0x463d225d64e8e6df6614f82975086346dd5c8058" },
+-  "eterry-9-red": { pvtAddress: "0x7091c592a0d9df9f4e7aea16de4b2686e5837040", marketAddress: "0x0845b32e11333658b8556ce361b06a90dbffdc16" },
+-  "eterry-9": { pvtAddress: "0xef24f62ec10ec813d272d92009a63746f411769f", marketAddress: "0xd1adcc5213de7b3166fa49c439e5492c29f5345b" },
+-  "ferraria": { pvtAddress: "0xad06a482c89b4b4c1f5d433a571f8c892e9e1f44", marketAddress: "0xae11bc301b39153da0c53af0af8aec8546fe2b2f" },
+-  "gemma": { pvtAddress: "0xdfd058ad43a4a5bd217b56dd4cc1928a4dcf8157", marketAddress: "0xec46c5a29da258d836586caf23917129af637e0e" },
+-  "genesis": { pvtAddress: "0x055512bcf323a3dcb9a3fc489624ec2c9471c897", marketAddress: "0x07d4e6a59ddcc487d5bc86703fcb8f82ca6d2427" },
+-  "giada": { pvtAddress: "0xb8b72cf29de7422c5f0beb7b48820f77c984ec5f", marketAddress: "0xa538f0bf9af31267a84f2725d6742b1b7c3ee71e" },
+-  "isabella": { pvtAddress: "0x9e8982b567f23b99bc506a5b71fafb12718dfd26", marketAddress: "0xccb158fd4ed2617cfdc5a20fc859f683868f6f7e" },
+-  "jade": { pvtAddress: "0x50d0b893eca6c09c59d0a962517c0c0aed09e1b8", marketAddress: "0xf003f1b38df74b4b31c769a3dbc1ac33a5f5b2b9" },
+-  "josephine": { pvtAddress: "0x9f2aba0feebbe31fa6c6461a8130274945153158", marketAddress: "0xe9d0504f680c6d7a14c6724c064f7b0e84862c9c" },
+-  "karin": { pvtAddress: "0x1c48069e3897a8dee138471bd676bb6b402a95d0", marketAddress: "0xd701d78296c6b3f909918e089acd2e56ea908d99" },
+-  "magic-circles": { pvtAddress: "0x95be8016c25ab2aec1bce97054f504f2cd305651", marketAddress: "0xef8b549ffcd71d5861e5fa13e265637586dbca6c" },
+-  "malina": { pvtAddress: "0xf3cc7ed3e7b612d10d3ffbcae12ee603f8bf9180", marketAddress: "0x26e588348fbcb339dad18a34f49dd46e7207d550" },
+-  "moderna": { pvtAddress: "0x9818f4c76bb6a2b32c3e3d50152ef89e83b967f2", marketAddress: "0x8f0bae0664ac31b02985ea4af8e0aeb718347be5" },
+-  "nova": { pvtAddress: "0x428d68ebdead23efc0360e6fc62e300d1e068af6", marketAddress: "0x6feb1cf7c073d6d0dee008c95b824fb1d2b79e5d" },
+-  "paloma": { pvtAddress: "0x1e8d350c72bd93f2fcce6d989423c1ceaba48cd6", marketAddress: "0x4f5c7bf8556c3645f571a52f7a094b1f7dfb7d81" },
+-  "rita": { pvtAddress: "0x44d968992a8c990c3e52d681cdd12c3853071f03", marketAddress: "0x54514853bcbc4f943ec26acb4184f679db90cbf1" },
+-  "sensual-skin": { pvtAddress: "0x96568907b016bea7da6ee605bfa0f1b9fd7c098c", marketAddress: "0x49bc3bdc3051967f4e15d9b81498fc6c16cb48a2" },
+-  "shania": { pvtAddress: "0x9c45545099a6907f1fce82574bd32e049bdd880a", marketAddress: "0x63f605a1a2f3106e673d5fcc4a0d512a913787e1" },
+-  "skylar": { pvtAddress: "0xe5746455acc156d5f06f7d3b8ff8395beadef31e", marketAddress: "0x956310d7e4441e45f48e4340037196701b6476b7" },
+-  "symbol-of-love": { pvtAddress: "0x54afd36c441c1900f7c35cbbb37bab18bb218593", marketAddress: "0x5c1fe3a973e73e91e06bad136f4747bfb8517162" },
+-  "whitney": { pvtAddress: "0x04d26681c1de455437d4efea78d9cf43e37fb9c2", marketAddress: "0x96d1a99353f742ca74bfef0799870b914d310193" },
+-  "your-name-bracelet": { pvtAddress: "0xe1e00de5d5059d940cb6394e3bb0c29070cbb305", marketAddress: "0xa4cea94c055c2e8f527e5ac6d116b35c748e6872" },
+-  "zelena": { pvtAddress: "0x9f4b52d87bf64f79854c07359bbc41bb356b905f", marketAddress: "0x854e7619457eadd6ee472c4896061a7e18098970" },
++  "agatha": { pvtAddress: "0xeb00b545aa430a7b13b506c9578384fce1155c39", marketAddress: "0x2e7ce85ce402fd48a9ff19f930d8974d4d46a671" },
++  "anaconda": { pvtAddress: "0x2e21238e20d3507d451f86322e61c30e8b9abdfa", marketAddress: "0xa6871d2715b5602d91ede52ff1539fcc26273a7d" },
++  "annabelle": { pvtAddress: "0xf714ed8ebfc8a13bfeacf4a5f1a73dc678aecb47", marketAddress: "0x7ba5a4e701c8f5eae5f2fa614a7739c7a3cbcef3" },
++  "arisa": { pvtAddress: "0x2413f788680c9eb3d0223fdf6b166d3b5076780e", marketAddress: "0xcd8a5cb85131d65d163af072cfda3846477b3ae9" },
++  "astride": { pvtAddress: "0x363641cc3b79428c30fe9f62f552df0658425664", marketAddress: "0x8cb001df56172391855663eb9af1ceb75471e110" },
++  "aurora": { pvtAddress: "0x7b98d14ec7a16613a70c16ad0a30abe7070dd419", marketAddress: "0x2968c22bc18ef9e58ffa9768b853467a65cb8316" },
++  "autumn": { pvtAddress: "0xf3435dd88a7b77121608fd99cefbd58da00ea2d5", marketAddress: "0x8aae8ce47c3df15f10bacd768f058205153f4ea2" },
++  "bette": { pvtAddress: "0xa21485f788c96a2d11daefbf9e4a110065d8d351", marketAddress: "0x8c7cc3dc07af39c6503ac136904c0f558eb9cd3c" },
++  "bit-of-history": { pvtAddress: "0xc477a8b2fd2ac1ab8125cfdb8a676e4c69b782d2", marketAddress: "0x7cef14afcef20cfd853ada7e9bf4377a1a785cf7" },
++  "calla": { pvtAddress: "0x66a8d993dc217325292abff2e73454189c644eba", marketAddress: "0x362b0859d30eaf1a74e868a331f0d5aab345001c" },
++  "declaration-of-love": { pvtAddress: "0xb81df7ab396773af6cf9fef42fd759d3df11dc9b", marketAddress: "0xc98e07379a0c796d5b041be249343b3ca9f53a1a" },
++  "demivika": { pvtAddress: "0xea4817458cfa918b8c39f9e15a108646d93464ac", marketAddress: "0x5739feb18b30defeab2ceb1ca3d1dd7d2f799146" },
++  "diana": { pvtAddress: "0xf261b35e9981f1cc9d983253cf90aeb8e7fc27b0", marketAddress: "0x37293454a343ad435dff07761474152f72bab7b6" },
++  "double-bracelet": { pvtAddress: "0x0e7ce532599d44376aeade3455b2ab7779c7618a", marketAddress: "0x2700ec4f3b8351403ba82e5bbdcefa7df2c7bff1" },
++  "eiffelia": { pvtAddress: "0xa50268c8f4a2af583ff9e07ce12d731a343beed1", marketAddress: "0xd73a289439ebd81bef843a1fee389c88b0cf76da" },
++  "eivissa": { pvtAddress: "0x8f1250699397ab4569f42fc961b9d256dc3aa5d5", marketAddress: "0x9b5f66eea92407fb45c8757df3a61f3e2e06421b" },
++  "eleonora": { pvtAddress: "0x33d01aeab3267f80e0b536ca3951444b6269f24c", marketAddress: "0x0c66dce41dfe28595cbe70e26e2e07da7138fb59" },
++  "eterry-9-black": { pvtAddress: "0x42c9d93ad29a6a6a7cc395a3e02f760c6ddd709b", marketAddress: "0x7f4aac7b2060eee02c7ce6bc64f4034f1424b699" },
++  "eterry-9-red": { pvtAddress: "0x89f82b6f5bb4d1f69ef6b00902240b95a2bb189e", marketAddress: "0xabae80fb386fad7f6329b2a3d766f5ae3dca1db6" },
++  "eterry-9": { pvtAddress: "0x1e7a17447b1127301e2ad659e8e930060e1ba842", marketAddress: "0xde498c57772955bacc8b39437f12ed996a90e9db" },
++  "ferraria": { pvtAddress: "0xe34e04e37a92c28b0be4be6df766df3ac8efc016", marketAddress: "0xe3fc2ef16ab39c6b1572524df7294027457da335" },
++  "gemma": { pvtAddress: "0xa7f5e450625e4b4eae04601cd80520afa289d24e", marketAddress: "0xde5bdc6c7b6c895a5970c7fe065c4c7ba5e78550" },
++  "genesis": { pvtAddress: "0x00aee964055be21c14a9ba3582544688486f860a", marketAddress: "0x8379a28b5b41a49fb39cee2de7990a2803c14db4" },
++  "giada": { pvtAddress: "0xcfd1fe353e8a3ab4ffd9d8c308a164f259bc572a", marketAddress: "0x668c255590cf4363c88835056c983aa67294ebff" },
++  "isabella": { pvtAddress: "0x13260e53de8e291d50095cdf1bd91e60c61ce981", marketAddress: "0x4daff432ecce6a0b524d342994f789c56a857007" },
++  "jade": { pvtAddress: "0x37ea832bc42154f4aea87e37226a0bd349cf8c7f", marketAddress: "0xb2a0415a7c0cc3302186bd0d2a13491efb4d7d84" },
++  "josephine": { pvtAddress: "0xfbbedb91b5fd703d65850cd653e97652f21c942e", marketAddress: "0x242809ec991827a1f82edf290b2ea781eb366a86" },
++  "karin": { pvtAddress: "0x774458965ed5d2906f99328bec5ef91e3f719e24", marketAddress: "0xaaeec1423263bedbdf1c358f5a171b63458f1f33" },
++  "magic-circles": { pvtAddress: "0x6341b7945e744c4de9ed0394e5ab0df82b67ab1d", marketAddress: "0x72734d49f02c0573eb8575c7ae90427cc48708de" },
++  "malina": { pvtAddress: "0xfa6c2c37fd9a8a3f2dc1697b4b610544e986de54", marketAddress: "0xb8a5a8d52b63a0feceeaaac3125740c1018e1e6f" },
++  "moderna": { pvtAddress: "0x0082e57de8357a5712b1c8bef39c51fb95995380", marketAddress: "0xe9a75c9169e28acbba80418504e2b65f20a3c17d" },
++  "nova": { pvtAddress: "0xdb81303a2ca879c0cda70ce776d1b60a35ee0edb", marketAddress: "0xfb97cca6e6e19408993b63f173a330b37d2f7401" },
++  "paloma": { pvtAddress: "0xbc57e56461d066f5c19a4199af790bdfe825280d", marketAddress: "0x3723a58885058c2bf86e4a789d87780941967e85" },
++  "rita": { pvtAddress: "0x8fa3192fd6d7d5bdd89ca9614e87938ae6d6d9da", marketAddress: "0x8d9800a17e956c978366c39b38dac8c0512898cc" },
++  "sensual-skin": { pvtAddress: "0xabc000dfd0103571ea1568fc8cb35be6b5a855db", marketAddress: "0xdd56956c157cd0065bb39221444e72d4ecdf118a" },
++  "shania": { pvtAddress: "0xe9d4a75be57bf67edf0a690cd1910185944ee89c", marketAddress: "0xbaea0ae7c0109ed501a77f30d1ea8bfb0607a63c" },
++  "skylar": { pvtAddress: "0xb30eaaf343e962e617e80bc3e317412b0feb8f2d", marketAddress: "0xcd9d88656f0f16fc30cd1c0d9caf3626b45b1dac" },
++  "symbol-of-love": { pvtAddress: "0xc407ed5b69ff7bec54ea802a98c3fd1711fa19ff", marketAddress: "0x158b2a57829fa15aff98fce207b9f3c2d71aecc1" },
++  "whitney": { pvtAddress: "0x3acb576ed76a55752bb0b26f0e7ecb59b34546e5", marketAddress: "0x5689755dad2bb36a2c44badf055e048d32a9b1f1" },
++  "your-name-bracelet": { pvtAddress: "0x65e2d74f727712bdddc5061fb1865858aa8b0774", marketAddress: "0x1775293e3cb7958476972eb975fa6a7427262278" },
++  "zelena": { pvtAddress: "0x8a5c5ed3a55acb5c6c237ed8d2e6f43a90f8b00b", marketAddress: "0x1301688ccb61d82d678fd0509f8855971f23ef42" },
+ }
+ 
+ export function getProductContracts(productId: string) {

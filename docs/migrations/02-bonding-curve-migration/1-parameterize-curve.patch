@@ -1,0 +1,778 @@
+commit 8694fb1a5759d057ef66b3a1de07d52309a68d02
+Author: admin <admin@MacBook-Pro-de-admin.local>
+Date:   Tue Aug 25 08:31:04 2026 -0400
+
+    feat: parameterize the bonding curve — brand's fast/medium/slow now real
+    
+    Every market read the same five hardcoded SigmoidMath constants
+    (b=500, c=100_000, P=1000, a=100/200) regardless of its own supply cap
+    or the fast/medium/slow shape a brand picked in the campaign wizard —
+    that choice was captured for display only (CampaignRecord.curveShape)
+    and never reached the contract. Concretely broken for every demo
+    product: with a fixed b=500 inflection and real supply caps of
+    20-60, the curve never gets anywhere near its own inflection point,
+    so price barely moves at all across a product's whole real supply
+    range (~$915-920 the entire way, confirmed numerically) regardless of
+    what price range was configured.
+    
+    - contracts/src/SigmoidMath.sol: getPrice/getTotalCost now take a
+      CurveParams struct (b/c/p/aPrimary/aSecondary) instead of hardcoded
+      constants. Same formula, now per-market.
+    - contracts/src/IMPXMarket.sol: five new immutables replace
+      INFLECTION_POINT; constructor takes a CurveParams struct (structs
+      can't be immutable directly, so it's unpacked into the five fields).
+      Every SigmoidMath call site updated.
+    - agents/src/valet/curve.ts (new): deriveCurveParams(minPrice, maxPrice,
+      totalSupply, curveShape) — the actual derivation. b scales to the
+      market's own supply cap instead of a fixed 500; c = k·b² per shape
+      (fast=0.15/medium=0.4/slow=1.0, medium's ratio is exactly the
+      original constants'); P and the two amplitudes solved so
+      price(0)=minPrice, price(totalSupply)=maxPrice, and the original
+      "secondary zone is 2x steeper" asymmetry holds. Verified numerically:
+      reproduces the original curve almost exactly at its own reference
+      scale (medium/1000/~$916-1168), correctly makes a flat curve when
+      min===max (the wizard's "Flat Price" mode), stays monotonic across
+      200 randomized configs, and actually spans a demo-scale (50-unit)
+      product's configured price range instead of the ~$5 total movement
+      the old fixed curve gave it.
+    - Wired into the only three places that ever deploy an IMPXMarket:
+      valet/index.ts's live createCampaign() (uses the brand's real
+      basePriceUsdc/maxPriceUsdc/curveShape — already being collected,
+      just never used), deployDemoProducts.ts (fixed $850-$1200/medium
+      reference range, scaled per product's own supply cap — a pure scale
+      fix, not a pricing change), migrateCampaignContracts.ts (same,
+      reading each campaign's actual configured range).
+    - contracts/test/POPZ.t.sol: 63/63 passing (62 previous + 1 new —
+      test_Sigmoid_Parameterized_DifferentMarketsDifferentCurves,
+      demonstrating the exact bug/fix numerically in-contract).
+    
+    Not yet done: the 54 live markets still run the old fixed curve until
+    redeployed — this is a contract-level change only, same shape as the
+    registry migration (new addresses, needs re-authorization + liquidity
+    reseed). Flagging before running it rather than doing it unprompted.
+
+diff --git a/agents/src/scripts/deployDemoProducts.ts b/agents/src/scripts/deployDemoProducts.ts
+index 3897348..ba1cec1 100644
+--- a/agents/src/scripts/deployDemoProducts.ts
++++ b/agents/src/scripts/deployDemoProducts.ts
+@@ -13,6 +13,7 @@ import { baseSepolia } from "viem/chains"
+ import { readFileSync, writeFileSync } from "fs"
+ import { fileURLToPath } from "url"
+ import path from "path"
++import { deriveCurveParams } from "../valet/curve.js"
+ 
+ const __dir = path.dirname(fileURLToPath(import.meta.url))
+ 
+@@ -96,7 +97,8 @@ const PVT_DEPLOY_ABI = [{
+ 
+ // Constructor shrank from 14 args to 11 when the four shared singleton
+ // addresses (rammToken/redemptionNFT/vestingVault/promoStaking) moved behind
+-// a single RammRegistry — see contracts/src/RammRegistry.sol.
++// a single RammRegistry — see contracts/src/RammRegistry.sol. Grew back to
++// 12 with the added _curve tuple — see contracts/src/SigmoidMath.sol.
+ const MARKET_DEPLOY_ABI = [{
+   type: "constructor",
+   inputs: [
+@@ -111,10 +113,30 @@ const MARKET_DEPLOY_ABI = [{
+     { name: "_sellBrandBps",     type: "uint16" },
+     { name: "_sellCampaignBps",  type: "uint16" },
+     { name: "_promoterBps",      type: "uint16" },
++    {
++      name: "_curve", type: "tuple",
++      components: [
++        { name: "b",          type: "uint256" },
++        { name: "c",          type: "uint256" },
++        { name: "p",          type: "uint256" },
++        { name: "aPrimary",   type: "uint256" },
++        { name: "aSecondary", type: "uint256" },
++      ],
++    },
+   ],
+   stateMutability: "nonpayable",
+ }] as const
+ 
++// Demo catalog has no brand-configured price range (no wizard involved) —
++// use the same reference range as the original fixed constants (medium
++// shape) so this stays a strict scale-fix, not a pricing change: the actual
++// $ range shown is unaffected by the curve, only how much it MOVES across
++// each product's own (much smaller) supply cap. See deriveCurveParams() —
++// this is exactly the bug it fixes: the old fixed b=500 curve barely moved
++// at all across a 20-60 unit demo product's real supply range.
++const DEMO_MIN_PRICE_USDC = 850_000_000  // $850
++const DEMO_MAX_PRICE_USDC = 1_200_000_000 // $1200
++
+ const TRANSFER_OWNERSHIP_ABI = [{
+   name: "transferOwnership",
+   type: "function",
+@@ -230,12 +252,14 @@ async function main() {
+     console.log(`  PVT:    ${pvtAddress}`)
+ 
+     // 2 — IMPXMarket
++    const curve = deriveCurveParams(DEMO_MIN_PRICE_USDC, DEMO_MAX_PRICE_USDC, product.supplyCap, "medium")
+     const marketHash = await walletClient.deployContract({
+       abi: MARKET_DEPLOY_ABI, bytecode: marketBytecode, nonce: nonce++,
+       args: [
+         USDC_ADDRESS, pvtAddress, REGISTRY_ADDRESS,
+         BRAND_WALLET, account.address, account.address,
+         9300, 700, 500, 200, 600, // buyBrandBps, buyCampaignBps, sellBrandBps, sellCampaignBps, promoterBps — matches Deploy.s.sol defaults
++        curve,
+       ],
+     })
+     const marketReceipt = await publicClient.waitForTransactionReceipt({ hash: marketHash })
+diff --git a/agents/src/scripts/migrateCampaignContracts.ts b/agents/src/scripts/migrateCampaignContracts.ts
+index 1762b55..de044af 100644
+--- a/agents/src/scripts/migrateCampaignContracts.ts
++++ b/agents/src/scripts/migrateCampaignContracts.ts
+@@ -24,6 +24,7 @@ import { baseSepolia } from "viem/chains"
+ import { readFileSync, writeFileSync } from "fs"
+ import { fileURLToPath } from "url"
+ import path from "path"
++import { deriveCurveParams } from "../valet/curve.js"
+ 
+ const __dir = path.dirname(fileURLToPath(import.meta.url))
+ const CAMPAIGNS_PATH = path.resolve(__dir, "../../data/campaigns.json")
+@@ -56,7 +57,8 @@ const PVT_DEPLOY_ABI = [{
+ 
+ // Constructor shrank from 14 args to 11 when the four shared singleton
+ // addresses (rammToken/redemptionNFT/vestingVault/promoStaking) moved behind
+-// a single RammRegistry — see contracts/src/RammRegistry.sol.
++// a single RammRegistry — see contracts/src/RammRegistry.sol. Grew back to
++// 12 with the added _curve tuple — see contracts/src/SigmoidMath.sol.
+ const MARKET_DEPLOY_ABI = [{
+   type: "constructor",
+   inputs: [
+@@ -71,6 +73,16 @@ const MARKET_DEPLOY_ABI = [{
+     { name: "_sellBrandBps", type: "uint16" },
+     { name: "_sellCampaignBps", type: "uint16" },
+     { name: "_promoterBps", type: "uint16" },
++    {
++      name: "_curve", type: "tuple",
++      components: [
++        { name: "b",          type: "uint256" },
++        { name: "c",          type: "uint256" },
++        { name: "p",          type: "uint256" },
++        { name: "aPrimary",   type: "uint256" },
++        { name: "aSecondary", type: "uint256" },
++      ],
++    },
+   ],
+   stateMutability: "nonpayable",
+ }] as const
+@@ -120,6 +132,9 @@ interface CampaignRecord {
+   buyPlatformRateBps?: number
+   sellPromoterRateBps?: number
+   sellPlatformRateBps?: number
++  basePriceUsdc?: number
++  maxPriceUsdc?: number
++  curveShape?: "fast" | "medium" | "slow"
+   [key: string]: unknown
+ }
+ 
+@@ -173,12 +188,25 @@ async function main() {
+     const sellBrandBps = sellPromoterRateBps + sellPlatformRateBps
+     const sellCampaignBps = 0
+ 
++    // Real brand-configured price range + curve shape, same derivation the
++    // live createCampaign() path uses now — falls back to the reference
++    // medium/$850-$1200 range if an older campaign record predates these
++    // fields (basePriceUsdc has been on CampaignRecord since before this
++    // migration; the fallback only matters for genuinely ancient records).
++    const curve = deriveCurveParams(
++      c.basePriceUsdc ?? 850_000_000,
++      c.maxPriceUsdc ?? c.basePriceUsdc ?? 1_200_000_000,
++      c.totalSupply,
++      c.curveShape ?? "medium"
++    )
++
+     const marketHash = await deployerWallet.deployContract({
+       abi: MARKET_DEPLOY_ABI, bytecode: marketBytecode, nonce: nonce++,
+       args: [
+         USDC_ADDRESS, pvtAddress, REGISTRY_ADDRESS,
+         c.brandWallet, campaignWallet, deployer.address,
+         buyBrandBps, buyCampaignBps, sellBrandBps, sellCampaignBps, buyPromoterRateBps,
++        curve,
+       ],
+     })
+     const marketReceipt = await publicClient.waitForTransactionReceipt({ hash: marketHash })
+diff --git a/agents/src/valet/curve.ts b/agents/src/valet/curve.ts
+new file mode 100644
+index 0000000..19afd23
+--- /dev/null
++++ b/agents/src/valet/curve.ts
+@@ -0,0 +1,90 @@
++/**
++ * Derives per-market SigmoidMath.CurveParams (contracts/src/SigmoidMath.sol)
++ * from what a brand actually configures in the campaign wizard: a price
++ * range (basePriceUsdc/maxPriceUsdc, raw 6-decimal USDC) and a curve shape
++ * (fast/medium/slow — see app-brand's DynamicPricingInput.tsx). Neither of
++ * those ever reached the contract before this — every market read the same
++ * five hardcoded constants regardless of its own supply cap or the brand's
++ * chosen shape (captured for display only, see CampaignRecord.curveShape).
++ *
++ * Unit note: `p`/`aPrimary`/`aSecondary` are PLAIN DOLLAR magnitudes, not
++ * raw 6-decimal USDC — matching the original hardcoded constants' own units
++ * (P_RAW = 1_000 meant $1000, not $0.001). SigmoidMath.getPrice() converts
++ * to 6-decimal USDC internally via the WAD/1e12 step at the end. `b`/`c` are
++ * plain raw token-count magnitudes (no currency conversion).
++ */
++
++export type CurveShape = "fast" | "medium" | "slow"
++
++export interface CurveParams {
++  b: bigint
++  c: bigint
++  p: bigint
++  aPrimary: bigint
++  aSecondary: bigint
++}
++
++// c = k · b² for each shape. Smaller k = steeper/"faster" transition around
++// the inflection; larger k = more gradual/"slower" ramp. k=0.4 is the exact
++// ratio the original fixed constants used (C_RAW=100_000, B_RAW=500 →
++// 100_000/500² = 0.4) — kept as "medium" so a market whose brand picks the
++// default shape at the original reference scale (totalSupply=1000,
++// ~$916–$1168) reproduces essentially the same curve, not a new one.
++const K_BY_SHAPE: Record<CurveShape, number> = {
++  fast: 0.15,
++  medium: 0.4,
++  slow: 1.0,
++}
++
++/**
++ * @param minPriceUsdc   Raw 6-decimal USDC price at supply=0 (basePriceUsdc)
++ * @param maxPriceUsdc   Raw 6-decimal USDC price at supply=totalSupply
++ * @param totalSupply    The market's actual supply cap — the inflection now
++ *                        scales to this instead of a fixed 500 that most
++ *                        demo products (supplyCap ~50) never got near,
++ *                        making the two-zone amplitude switch meaningless
++ *                        for them in practice.
++ * @param curveShape     Brand's chosen fast/medium/slow (defaults "medium")
++ */
++export function deriveCurveParams(
++  minPriceUsdc: number,
++  maxPriceUsdc: number,
++  totalSupply: number,
++  curveShape: CurveShape = "medium"
++): CurveParams {
++  const k = K_BY_SHAPE[curveShape] ?? K_BY_SHAPE.medium
++
++  const b = Math.max(1, Math.round(totalSupply / 2))
++  const c = Math.max(1, Math.round(k * b * b))
++  // term = b / sqrt(c + b²) — with c = k·b² this reduces to a scale-invariant
++  // 1/sqrt(k+1), independent of the actual supply cap.
++  const term = 1 / Math.sqrt(k + 1)
++
++  const minPrice = minPriceUsdc / 1e6
++  const maxPrice = Math.max(maxPriceUsdc / 1e6, minPrice) // flat pricing sends max === min
++
++  // Solve for P and the two amplitudes so that:
++  //   price(0)           = minPrice
++  //   price(totalSupply)  = maxPrice
++  //   aSecondary = 2 · aPrimary   (preserves the original design's "price
++  //                                rises steeper past the midpoint," not
++  //                                derived from min/max — a deliberate
++  //                                asymmetry, not an artifact)
++  // => P = (maxPrice + 2·minPrice) / 3
++  const p = Math.round((maxPrice + 2 * minPrice) / 3)
++  const aPrimary = Math.max(0, Math.round((p - minPrice) / term))
++  const aSecondary = aPrimary * 2
++
++  return {
++    b: BigInt(b),
++    c: BigInt(c),
++    p: BigInt(Math.max(1, p)),
++    aPrimary: BigInt(aPrimary),
++    aSecondary: BigInt(aSecondary),
++  }
++}
++
++/** As a tuple in the exact order SigmoidMath.CurveParams / the constructor expects. */
++export function curveParamsTuple(params: CurveParams): [bigint, bigint, bigint, bigint, bigint] {
++  return [params.b, params.c, params.p, params.aPrimary, params.aSecondary]
++}
+diff --git a/agents/src/valet/index.ts b/agents/src/valet/index.ts
+index 0a01bff..b6ab226 100644
+--- a/agents/src/valet/index.ts
++++ b/agents/src/valet/index.ts
+@@ -27,6 +27,7 @@ import { fileURLToPath } from "url"
+ import path from "path"
+ 
+ import { saveCampaign, getCampaign, getCampaignsByBrand, getAllCampaigns } from "./store.js"
++import { deriveCurveParams } from "./curve.js"
+ import { depositCodes, claimCode, remainingCodes, readVaultCodes } from "./vault.js"
+ import { recordAttribution, getPromoterEarnings, markDisbursed, getPendingAttributions } from "./attributions.js"
+ import { storeDpp, getDppByCampaignId } from "./dppStore.js"
+@@ -224,6 +225,17 @@ export async function createCampaign(params: CreateCampaignParams): Promise<{
+   const sellBrandBps   = sellPromoterRateBps + sellPlatformRateBps          // e.g. 350 total to campaign (split off-chain)
+   const sellCampaignBps = 0  // seller deduction goes to campaignWallet for off-chain distribution
+ 
++  // Bonding curve shape — was five constants shared by every market
++  // regardless of this campaign's own supply cap or the brand's chosen
++  // fast/medium/slow shape (captured above only for display until now).
++  // See agents/src/valet/curve.ts for the derivation.
++  const curve = deriveCurveParams(
++    params.basePriceUsdc,
++    params.maxPriceUsdc ?? params.basePriceUsdc,
++    params.totalSupply,
++    params.curveShape ?? "medium"
++  )
++
+   // 2 — Deploy IMPXMarket
+   let marketHash: `0x${string}`
+   try {
+@@ -244,6 +256,7 @@ export async function createCampaign(params: CreateCampaignParams): Promise<{
+         sellBrandBps,
+         sellCampaignBps,
+         buyPromoterRateBps,
++        curve,
+       ],
+     })
+   } catch (err) {
+@@ -670,7 +683,8 @@ const DEPOSIT_LIQUIDITY_ABI = [
+ 
+ // Constructor shrank from 14 args to 11 when the four shared singleton
+ // addresses (rammToken/redemptionNFT/vestingVault/promoStaking) moved behind
+-// a single RammRegistry — see contracts/src/RammRegistry.sol.
++// a single RammRegistry — see contracts/src/RammRegistry.sol. Grew back to
++// 12 with the added _curve tuple — see contracts/src/SigmoidMath.sol.
+ const MARKET_DEPLOY_ABI = [
+   {
+     type: "constructor",
+@@ -686,6 +700,16 @@ const MARKET_DEPLOY_ABI = [
+       { name: "_sellBrandBps",      type: "uint16"  },
+       { name: "_sellCampaignBps",   type: "uint16"  },
+       { name: "_promoterBps",       type: "uint16"  },
++      {
++        name: "_curve", type: "tuple",
++        components: [
++          { name: "b",          type: "uint256" },
++          { name: "c",          type: "uint256" },
++          { name: "p",          type: "uint256" },
++          { name: "aPrimary",   type: "uint256" },
++          { name: "aSecondary", type: "uint256" },
++        ],
++      },
+     ],
+     stateMutability: "nonpayable",
+   },
+diff --git a/contracts/script/Deploy.s.sol b/contracts/script/Deploy.s.sol
+index 8ec7cfc..0740617 100644
+--- a/contracts/script/Deploy.s.sol
++++ b/contracts/script/Deploy.s.sol
+@@ -10,6 +10,7 @@ import {VestingVault} from "../src/VestingVault.sol";
+ import {PromoStaking} from "../src/PromoStaking.sol";
+ import {RammRegistry} from "../src/RammRegistry.sol";
+ import {IMPXMarket} from "../src/IMPXMarket.sol";
++import {SigmoidMath} from "../src/SigmoidMath.sol";
+ 
+ /// @notice Deploy RAMM MVP3 contracts to Base Sepolia.
+ ///
+@@ -104,7 +105,12 @@ contract Deploy is Script {
+             700,            // buyCampaignBps
+             500,            // sellBrandBps
+             200,            // sellCampaignBps
+-            600             // promoterBps
++            600,            // promoterBps
++            // Original fixed curve, kept literally here — this script is the
++            // legacy single-product fallback; real deploys go through
++            // agents/src/valet/curve.ts's deriveCurveParams() now (see
++            // SigmoidMath.sol / IMPXMarket.sol for why this became per-market).
++            SigmoidMath.CurveParams({b: 500, c: 100_000, p: 1_000, aPrimary: 100, aSecondary: 200})
+         );
+         console2.log("IMPXMarket:   ", address(market));
+ 
+diff --git a/contracts/src/IMPXMarket.sol b/contracts/src/IMPXMarket.sol
+index 60b1e74..91a6ad3 100644
+--- a/contracts/src/IMPXMarket.sol
++++ b/contracts/src/IMPXMarket.sol
+@@ -63,7 +63,19 @@ contract IMPXMarket is Ownable, ReentrancyGuard {
+     uint256 public currentSupply;
+     bool public isSecondaryMarket;
+ 
+-    uint256 public constant INFLECTION_POINT = 500;
++    // ── Bonding curve shape (per-market, set at deploy time) ─────────────────
++    // Was five hardcoded constants shared by every market (SigmoidMath.sol),
++    // regardless of the market's actual supply cap or the brand's chosen
++    // fast/medium/slow curve — captured in the campaign wizard but never
++    // reaching the contract. See SigmoidMath.sol's CurveParams doc and
++    // agents/src/valet/curve.ts (deriveCurveParams) for how these five values
++    // get derived from what a brand actually configures.
++    uint256 public immutable CURVE_B;          // inflection supply — also the
++                                                // isSecondaryMarket threshold below
++    uint256 public immutable CURVE_C;          // steepness
++    uint256 public immutable CURVE_P;          // base price at inflection, USDC 6dp
++    uint256 public immutable CURVE_A_PRIMARY;  // amplitude below the inflection
++    uint256 public immutable CURVE_A_SECONDARY; // amplitude at/above the inflection
+ 
+     /// @notice GMV tracking — total USDC received across all buys
+     uint256 public accruedRevenue;
+@@ -166,6 +178,10 @@ contract IMPXMarket is Ownable, ReentrancyGuard {
+     /// @param _sellCampaignBps   Sell deduction routed to campaignWallet (e.g. 200)
+     /// @param _promoterBps       Bps of actualCost credited to a staked promoter on a referred
+     ///                           buy, carved out of buyCampaignBps (e.g. 600)
++    /// @param _curve             Bonding curve shape — see SigmoidMath.CurveParams and
++    ///                           deriveCurveParams() in agents/src/valet/curve.ts for how
++    ///                           a brand's (minPrice, maxPrice, totalSupply, curveShape)
++    ///                           inputs turn into this struct's five raw values.
+     constructor(
+         address _usdc,
+         address _pvt,
+@@ -177,11 +193,13 @@ contract IMPXMarket is Ownable, ReentrancyGuard {
+         uint16 _buyCampaignBps,
+         uint16 _sellBrandBps,
+         uint16 _sellCampaignBps,
+-        uint16 _promoterBps
++        uint16 _promoterBps,
++        SigmoidMath.CurveParams memory _curve
+     ) Ownable(_initialOwner) {
+         require(_buyBrandBps + _buyCampaignBps == 10_000, "buy BPS must sum to 10000");
+         require(_sellBrandBps + _sellCampaignBps <= 10_000, "sell BPS must not exceed 10000");
+         require(_promoterBps <= _buyCampaignBps, "promoter BPS must not exceed campaign BPS");
++        require(_curve.b > 0 && _curve.c > 0 && _curve.p > 0, "curve params must be non-zero");
+         usdc = IERC20(_usdc);
+         pvt = PVTToken(_pvt);
+         registry = RammRegistry(_registry);
+@@ -193,6 +211,20 @@ contract IMPXMarket is Ownable, ReentrancyGuard {
+         SELL_CAMPAIGN_BPS = _sellCampaignBps;
+         SELL_SPREAD_BPS = _sellBrandBps + _sellCampaignBps;
+         PROMOTER_BPS = _promoterBps;
++        CURVE_B = _curve.b;
++        CURVE_C = _curve.c;
++        CURVE_P = _curve.p;
++        CURVE_A_PRIMARY = _curve.aPrimary;
++        CURVE_A_SECONDARY = _curve.aSecondary;
++    }
++
++    /// @notice Reassembles the struct SigmoidMath's functions take, from the
++    ///         five immutables above (structs can't be immutable directly).
++    function _curveParams() internal view returns (SigmoidMath.CurveParams memory) {
++        return SigmoidMath.CurveParams({
++            b: CURVE_B, c: CURVE_C, p: CURVE_P,
++            aPrimary: CURVE_A_PRIMARY, aSecondary: CURVE_A_SECONDARY
++        });
+     }
+ 
+     // ─────────────────────────────────────────────────────────────────────────
+@@ -246,7 +278,7 @@ contract IMPXMarket is Ownable, ReentrancyGuard {
+         uint256 remaining = pvt.remainingSupply();
+         if (quantity > remaining) revert SoldOut(quantity, remaining);
+ 
+-        uint256 actualCost = SigmoidMath.getTotalCost(currentSupply, quantity);
++        uint256 actualCost = SigmoidMath.getTotalCost(currentSupply, quantity, _curveParams());
+ 
+         if (actualCost > maxUsdcCost) {
+             emit SwapFailed(msg.sender, quantity, maxUsdcCost, actualCost, "SLIPPAGE_EXCEEDED");
+@@ -290,7 +322,7 @@ contract IMPXMarket is Ownable, ReentrancyGuard {
+ 
+         currentSupply += quantity;
+ 
+-        if (!isSecondaryMarket && currentSupply >= INFLECTION_POINT) {
++        if (!isSecondaryMarket && currentSupply >= CURVE_B) {
+             isSecondaryMarket = true;
+             emit MarketTransition(currentSupply, block.timestamp);
+         }
+@@ -310,11 +342,11 @@ contract IMPXMarket is Ownable, ReentrancyGuard {
+     // ─────────────────────────────────────────────────────────────────────────
+ 
+     function getCurrentPrice() external view returns (uint256 price) {
+-        return SigmoidMath.getPrice(currentSupply);
++        return SigmoidMath.getPrice(currentSupply, _curveParams());
+     }
+ 
+     function getQuote(uint256 quantity) external view returns (uint256 totalCost) {
+-        return SigmoidMath.getTotalCost(currentSupply, quantity);
++        return SigmoidMath.getTotalCost(currentSupply, quantity, _curveParams());
+     }
+ 
+     function getCurveData()
+@@ -326,9 +358,10 @@ contract IMPXMarket is Ownable, ReentrancyGuard {
+         uint256 points = cap / 10 + 1;
+         supplies = new uint256[](points);
+         prices = new uint256[](points);
++        SigmoidMath.CurveParams memory params = _curveParams();
+         for (uint256 i = 0; i < points; i++) {
+             supplies[i] = i * 10;
+-            prices[i] = SigmoidMath.getPrice(i * 10);
++            prices[i] = SigmoidMath.getPrice(i * 10, params);
+         }
+     }
+ 
+@@ -346,7 +379,7 @@ contract IMPXMarket is Ownable, ReentrancyGuard {
+         supply = currentSupply;
+         supplyCap = pvt.supplyCap();
+         remaining = pvt.remainingSupply();
+-        currentPrice = SigmoidMath.getPrice(currentSupply);
++        currentPrice = SigmoidMath.getPrice(currentSupply, _curveParams());
+         secondaryMarket = isSecondaryMarket;
+     }
+ 
+@@ -360,7 +393,7 @@ contract IMPXMarket is Ownable, ReentrancyGuard {
+         returns (uint256 grossProceeds, uint256 netProceeds)
+     {
+         if (quantity == 0 || quantity > currentSupply) return (0, 0);
+-        grossProceeds = SigmoidMath.getTotalCost(currentSupply - quantity, quantity);
++        grossProceeds = SigmoidMath.getTotalCost(currentSupply - quantity, quantity, _curveParams());
+         // Mirror sellPVT arithmetic exactly to avoid rounding divergence
+         uint256 sellBrandFee    = (grossProceeds * SELL_BRAND_BPS)    / 10_000;
+         uint256 sellCampaignFee = (grossProceeds * SELL_CAMPAIGN_BPS) / 10_000;
+@@ -379,7 +412,7 @@ contract IMPXMarket is Ownable, ReentrancyGuard {
+         uint256 sellerBalance = pvt.balanceOf(msg.sender);
+         if (sellerBalance < quantity) revert InsufficientPVTHolding(quantity, sellerBalance);
+ 
+-        uint256 grossProceeds   = SigmoidMath.getTotalCost(currentSupply - quantity, quantity);
++        uint256 grossProceeds   = SigmoidMath.getTotalCost(currentSupply - quantity, quantity, _curveParams());
+         uint256 sellBrandFee    = (grossProceeds * SELL_BRAND_BPS)    / 10_000;
+         uint256 sellCampaignFee = (grossProceeds * SELL_CAMPAIGN_BPS) / 10_000;
+         uint256 netProceeds     = grossProceeds - sellBrandFee - sellCampaignFee;
+diff --git a/contracts/src/SigmoidMath.sol b/contracts/src/SigmoidMath.sol
+index a4716e0..82dc7f2 100644
+--- a/contracts/src/SigmoidMath.sol
++++ b/contracts/src/SigmoidMath.sol
+@@ -6,13 +6,27 @@ pragma solidity ^0.8.23;
+ ///
+ ///   Price = a · (S − b) / √(c + (S − b)²) + P
+ ///
+-///   Where (MVP1 constants):
+-///     a = 100     (amplitude — half the price swing)
+-///     b = 500     (supply inflection point)
+-///     c = 100 000 (steepness)
+-///     P = 1 000   (base price at inflection in USD)
++///   Parameterized per-market (see CurveParams) — MVP1 shipped with one fixed
++///   curve shared by every market regardless of supply cap or the brand's
++///   chosen fast/medium/slow shape (captured in the campaign wizard but never
++///   actually reaching the contract). This generalizes the same formula to
++///   take real per-market parameters instead of hardcoded constants:
+ ///
+-///   Price range: ~$916 (supply=0) → $1,000 (supply=500) → ~$1,084 (supply=1000)
++///     b = inflection supply           — scales with the market's actual
++///                                        supply cap instead of a fixed 500
++///                                        that most demo products (supplyCap
++///                                        ~50) never get anywhere near
++///     c = steepness                   — smaller c = steeper/"faster" curve
++///     p = base price at inflection
++///     aPrimary/aSecondary = amplitude below/at-or-above the inflection
++///
++///   See deriveCurveParams() (TS-side, agents/src/valet/curve.ts) for how
++///   (minPrice, maxPrice, totalSupply, curveShape) — the brand's actual
++///   inputs — turn into these five raw values: the "medium" shape at
++///   totalSupply=1000, minPrice≈$916, maxPrice≈$1168 reproduces essentially
++///   the same curve as the old fixed constants (a=100/200, b=500, c=100_000,
++///   P=1000), up to integer rounding — not a bit-exact replay, but the same
++///   shape at the same reference scale.
+ ///
+ /// @dev All internal arithmetic uses WAD (1e18) fixed-point.
+ ///      Key insight for correct sqrt:
+@@ -20,61 +34,56 @@ pragma solidity ^0.8.23;
+ ///        - sqrt_wad(x_raw) = sqrt(x_raw · WAD²) = sqrt(x_raw) · WAD
+ ///        - term_wad = diff · WAD² / sqrt_wad(denominator_sq)
+ ///                   = diff / sqrt(denominator_sq) · WAD  ✓
+-///
+-/// Two-zone curve:
+-///   Primary   (supply < 500):  A=100  → ~$916 → $1,000
+-///   Secondary (supply ≥ 500):  A=200  → $1,000 → ~$1,168
+-///   Both share the same B, C, P so the price is exactly continuous at the inflection.
+ library SigmoidMath {
+     uint256 internal constant WAD = 1e18;
+ 
+-    // Shared curve parameters
+-    uint256 internal constant B_RAW = 500;     // inflection supply (both zones)
+-    uint256 internal constant C_RAW = 100_000; // steepness (both zones)
+-    uint256 internal constant P_RAW = 1_000;   // base price at inflection in USD
+-
+-    // Zone-specific amplitudes
+-    uint256 internal constant A_PRIMARY   = 100; // primary:   ~$916 → $1,000 (supply 0–499)
+-    uint256 internal constant A_SECONDARY = 200; // secondary: $1,000 → ~$1,168 (supply 500+)
++    /// @notice Per-market curve parameters, all in raw (non-WAD) integer
++    ///         space — see derivation note above for how these are chosen.
++    struct CurveParams {
++        uint256 b;          // inflection supply
++        uint256 c;          // steepness
++        uint256 p;          // base price at inflection, USDC 6dp
++        uint256 aPrimary;   // amplitude below the inflection (supply < b)
++        uint256 aSecondary; // amplitude at/above the inflection (supply >= b)
++    }
+ 
+     /// @notice Compute price in USDC (6 decimals) for the token at position `supply`.
+     ///         Amplitude switches at the inflection point for a steeper secondary curve.
+     /// @param supply  Raw token count already sold (not WAD-scaled)
+     /// @return price  USDC price with 6 decimals (e.g. 1_000_000_000 = $1000.00)
+-    function getPrice(uint256 supply) internal pure returns (uint256 price) {
++    function getPrice(uint256 supply, CurveParams memory params) internal pure returns (uint256 price) {
+         // Amplitude doubles in the secondary zone — same formula, different A.
+-        uint256 a = supply >= B_RAW ? A_SECONDARY : A_PRIMARY;
++        uint256 a = supply >= params.b ? params.aSecondary : params.aPrimary;
+ 
+         // ── Signed difference in raw space ───────────────────────────────────
+         uint256 diff;
+         bool negative;
+-        if (supply >= B_RAW) {
+-            diff = supply - B_RAW;
++        if (supply >= params.b) {
++            diff = supply - params.b;
+             negative = false;
+         } else {
+-            diff = B_RAW - supply;
++            diff = params.b - supply;
+             negative = true;
+         }
+ 
+         // ── Denominator: sqrt(c + diff²) in WAD ──────────────────────────────
+         uint256 diff_sq = diff * diff;
+-        uint256 denominator_raw_sq = C_RAW + diff_sq;
++        uint256 denominator_raw_sq = params.c + diff_sq;
+         uint256 denominator_wad = sqrt(denominator_raw_sq * WAD * WAD);
+ 
+         // ── Term = diff / sqrt(c + diff²) in WAD ─────────────────────────────
+-        // Handle zero diff (exactly at inflection): term = 0, price = P_RAW.
++        // Handle zero diff (exactly at inflection): term = 0, price = P.
+         uint256 term_wad = diff == 0 ? 0 : (diff * WAD * WAD) / denominator_wad;
+ 
+         // ── a · |term| in WAD ─────────────────────────────────────────────────
+-        // max for secondary: 200 · WAD = 2×10^20 — safe
+         uint256 a_term_wad = a * term_wad;
+ 
+         // ── price_wad = (P ± a·|term|) in WAD ────────────────────────────────
+         uint256 price_wad;
+         if (!negative) {
+-            price_wad = P_RAW * WAD + a_term_wad;
++            price_wad = params.p * WAD + a_term_wad;
+         } else {
+-            price_wad = P_RAW * WAD - a_term_wad;
++            price_wad = params.p * WAD - a_term_wad;
+         }
+ 
+         // ── Convert WAD → USDC 6 decimals ────────────────────────────────────
+@@ -83,13 +92,13 @@ library SigmoidMath {
+ 
+     /// @notice Total USDC cost to buy `quantity` tokens starting at `supply`.
+     ///         Discrete sum across consecutive positions (matches EVM gas model).
+-    function getTotalCost(uint256 supply, uint256 quantity)
++    function getTotalCost(uint256 supply, uint256 quantity, CurveParams memory params)
+         internal
+         pure
+         returns (uint256 totalCost)
+     {
+         for (uint256 i = 0; i < quantity; i++) {
+-            totalCost += getPrice(supply + i);
++            totalCost += getPrice(supply + i, params);
+         }
+     }
+ 
+diff --git a/contracts/test/POPZ.t.sol b/contracts/test/POPZ.t.sol
+index 79cc2af..46ac460 100644
+--- a/contracts/test/POPZ.t.sol
++++ b/contracts/test/POPZ.t.sol
+@@ -64,7 +64,11 @@ contract POPZTest is Test {
+             700,  // buyCampaignBps
+             500,  // sellBrandBps
+             200,  // sellCampaignBps
+-            600   // promoterBps
++            600,  // promoterBps
++            // Original fixed curve — kept literal so every existing price
++            // assertion below stays valid unchanged; parameterization tests
++            // live in their own block further down.
++            SigmoidMath.CurveParams({b: 500, c: 100_000, p: 1_000, aPrimary: 100, aSecondary: 200})
+         );
+ 
+         // Wire permissions
+@@ -105,50 +109,80 @@ contract POPZTest is Test {
+     // SigmoidMath
+     // ─────────────────────────────────────────────────────────────────────────
+ 
++    // The original fixed constants, now just one possible CurveParams value
++    // instead of hardcoded inside the library — see the parameterization
++    // block further down for tests against other shapes/scales.
++    function _originalCurve() private pure returns (SigmoidMath.CurveParams memory) {
++        return SigmoidMath.CurveParams({b: 500, c: 100_000, p: 1_000, aPrimary: 100, aSecondary: 200});
++    }
++
+     function test_Sigmoid_AtZero() public pure {
+-        uint256 price = SigmoidMath.getPrice(0);
++        uint256 price = SigmoidMath.getPrice(0, _originalCurve());
+         assertApproxEqRel(price, 900 * 1e6, 0.05e18);
+     }
+ 
+     function test_Sigmoid_AtInflection() public pure {
+-        uint256 price = SigmoidMath.getPrice(500);
++        uint256 price = SigmoidMath.getPrice(500, _originalCurve());
+         assertApproxEqRel(price, 1_000 * 1e6, 0.01e18);
+     }
+ 
+     function test_Sigmoid_AtMaxSupply() public pure {
+         // Secondary curve (A=200): price at supply=1000 ≈ $1,169
+-        uint256 price = SigmoidMath.getPrice(1_000);
++        uint256 price = SigmoidMath.getPrice(1_000, _originalCurve());
+         assertApproxEqRel(price, 1_169 * 1e6, 0.01e18);
+     }
+ 
+     function test_Sigmoid_SecondaryZoneHigherThanPrimary() public pure {
++        SigmoidMath.CurveParams memory curve = _originalCurve();
+         // At inflection both curves give exactly P_RAW = $1000
+-        assertEq(SigmoidMath.getPrice(500), 1_000 * 1e6);
++        assertEq(SigmoidMath.getPrice(500, curve), 1_000 * 1e6);
+         // Just above inflection: secondary is steeper than primary would have been
+-        assertGt(SigmoidMath.getPrice(501), SigmoidMath.getPrice(499));
++        assertGt(SigmoidMath.getPrice(501, curve), SigmoidMath.getPrice(499, curve));
+         // Price at supply=1000 (secondary) > supply=1000 under old primary curve (~$1084)
+-        assertGt(SigmoidMath.getPrice(1_000), 1_084 * 1e6);
++        assertGt(SigmoidMath.getPrice(1_000, curve), 1_084 * 1e6);
+     }
+ 
+     function test_Sigmoid_IsMonotonicallyIncreasing() public pure {
+-        uint256 prevPrice = SigmoidMath.getPrice(0);
++        SigmoidMath.CurveParams memory curve = _originalCurve();
++        uint256 prevPrice = SigmoidMath.getPrice(0, curve);
+         for (uint256 s = 10; s <= 600; s += 10) {
+-            uint256 price = SigmoidMath.getPrice(s);
++            uint256 price = SigmoidMath.getPrice(s, curve);
+             assertGe(price, prevPrice);
+             prevPrice = price;
+         }
+     }
+ 
+     function test_Sigmoid_GetTotalCost_SingleUnit() public pure {
+-        assertEq(SigmoidMath.getTotalCost(0, 1), SigmoidMath.getPrice(0));
++        SigmoidMath.CurveParams memory curve = _originalCurve();
++        assertEq(SigmoidMath.getTotalCost(0, 1, curve), SigmoidMath.getPrice(0, curve));
+     }
+ 
+     function test_Sigmoid_GetTotalCost_MultiUnit() public pure {
+-        uint256 cost = SigmoidMath.getTotalCost(100, 3);
+-        uint256 expected = SigmoidMath.getPrice(100) + SigmoidMath.getPrice(101) + SigmoidMath.getPrice(102);
++        SigmoidMath.CurveParams memory curve = _originalCurve();
++        uint256 cost = SigmoidMath.getTotalCost(100, 3, curve);
++        uint256 expected = SigmoidMath.getPrice(100, curve) + SigmoidMath.getPrice(101, curve) + SigmoidMath.getPrice(102, curve);
+         assertEq(cost, expected);
+     }
+ 
++    function test_Sigmoid_Parameterized_DifferentMarketsDifferentCurves() public pure {
++        // A demo-scale market (supply cap 50) using the SAME fixed constants
++        // as the original design barely moves in price across its whole
++        // range — this is the exact bug the parameterization fixes. A curve
++        // whose b/c actually scale to the market's own supply cap (as
++        // deriveCurveParams() in agents/src/valet/curve.ts computes) spans
++        // its configured range properly instead.
++        SigmoidMath.CurveParams memory stale = _originalCurve(); // b=500 — irrelevant to a 50-unit market
++        SigmoidMath.CurveParams memory scaled = SigmoidMath.CurveParams({
++            b: 25, c: 250, p: 967, aPrimary: 138, aSecondary: 276
++        }); // deriveCurveParams(850e6, 1200e6, 50, "medium")
++
++        uint256 staleRange = SigmoidMath.getPrice(50, stale) - SigmoidMath.getPrice(0, stale);
++        uint256 scaledRange = SigmoidMath.getPrice(50, scaled) - SigmoidMath.getPrice(0, scaled);
++
++        assertLt(staleRange, 10 * 1e6, "stale b=500 curve barely moves across a 50-unit market");
++        assertGt(scaledRange, 300 * 1e6, "scaled curve actually spans the configured price range");
++    }
++
+     // ─────────────────────────────────────────────────────────────────────────
+     // PVTToken
+     // ─────────────────────────────────────────────────────────────────────────
+@@ -550,7 +584,7 @@ contract POPZTest is Test {
+ 
+     function testFuzz_Sigmoid_NeverReverts(uint256 supply) public pure {
+         supply = bound(supply, 0, 10_000);
+-        SigmoidMath.getPrice(supply);
++        SigmoidMath.getPrice(supply, _originalCurve());
+     }
+ 
+     function testFuzz_Buy_SlippageAlwaysProtects(uint256 slippageBps) public {

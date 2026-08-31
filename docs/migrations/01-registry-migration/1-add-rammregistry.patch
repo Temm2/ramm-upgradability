@@ -1,0 +1,545 @@
+commit b0163e0127374a50ca753f6cd38a998f3374f34d
+Author: admin <admin@MacBook-Pro-de-admin.local>
+Date:   Mon Aug 24 13:09:32 2026 -0400
+
+    feat: RammRegistry — fix a shared contract without redeploying every market
+    
+    The real problem behind two full 49+8-market redeploys already done this
+    project: IMPXMarket stored RAMMToken, RedemptionNFT, VestingVault, and
+    PromoStaking as immutable addresses set at construction. Fixing any one
+    of those four meant deploying a new version AND redeploying every market
+    that referenced the old address — free but annoying on testnet, and a
+    genuine dead end on mainnet, where it would mean stranding real user
+    funds on markets that can never be pointed at the fix.
+    
+    RammRegistry is the standard answer (same shape as Aave's
+    PoolAddressesProvider / Compound's Comptroller registry pattern): one
+    small contract holding mutable pointers to the four shared singletons,
+    with onlyOwner setters. IMPXMarket now stores only the registry's own
+    address as immutable, and resolves the four dependencies fresh on every
+    call via _rammToken()/_redemptionNFT()/_vestingVault()/_promoStaking()
+    internal helpers. Rolling out a fix to any of the four is now one
+    setX() call on the registry — every market, old and new, picks it up
+    on its next call, no redeploy. Also simplifies IMPXMarket's constructor
+    from 14 params down to 11.
+    
+    The existing authorizedMarkets allow-list pattern on VestingVault/
+    RedemptionNFT/RAMMToken is unchanged and still necessary — the registry
+    solves "how does a market find the current vault," authorizedMarkets
+    solves "which markets can call the vault." Complementary, not redundant.
+    
+    Proven with a new test, not just asserted: deploys a second VestingVault
+    mid-test, points the *already-deployed* market at it via
+    registry.setVestingVault(), and confirms a referral credit lands in the
+    new vault with zero changes to the market contract.
+    (test_Registry_SwapVestingVault_NoMarketRedeployNeeded)
+    
+    Updated all three deployment paths that actually construct IMPXMarket —
+    Deploy.s.sol (reference script), agents/src/scripts/deployDemoProducts.ts
+    and migrateCampaignContracts.ts (the real bulk-deployment paths), and
+    VALET's live createCampaign() flow — to deploy/wire a registry instead
+    of passing the four addresses directly. All read from REGISTRY_ADDRESS.
+    
+    62/62 contract tests passing (58 existing + 4 new registry tests).
+    Not yet redeployed to Base Sepolia or migrated onto the live 49+8
+    markets — that's a real operational step (touches every product this
+    app has been tested against all session), holding for explicit go-ahead
+    before running it.
+    
+    Co-Authored-By: Claude Sonnet 5 <noreply@anthropic.com>
+
+diff --git a/agents/src/scripts/deployDemoProducts.ts b/agents/src/scripts/deployDemoProducts.ts
+index 08f6ad0..f9ae380 100644
+--- a/agents/src/scripts/deployDemoProducts.ts
++++ b/agents/src/scripts/deployDemoProducts.ts
+@@ -25,6 +25,7 @@ const RAMM_ADDRESS  = (process.env.RAMM_TOKEN_ADDRESS ?? "0x00000000000000000000
+ const NFT_ADDRESS   = (process.env.REDEMPTION_NFT_ADDRESS ?? "0x0000000000000000000000000000000000000000") as Address
+ const VAULT_ADDRESS = (process.env.VESTING_VAULT_ADDRESS ?? "0x0000000000000000000000000000000000000000") as Address
+ const STAKING_ADDRESS = (process.env.PROMO_STAKING_ADDRESS ?? "0x0000000000000000000000000000000000000000") as Address
++const REGISTRY_ADDRESS = process.env.REGISTRY_ADDRESS as Address
+ const BRAND_WALLET  = process.env.BRAND_ADDRESS as Address   // receives 93% on buy
+ 
+ // ── Products ─────────────────────────────────────────────────────────────────
+@@ -93,15 +94,15 @@ const PVT_DEPLOY_ABI = [{
+   stateMutability: "nonpayable",
+ }] as const
+ 
++// Constructor shrank from 14 args to 11 when the four shared singleton
++// addresses (rammToken/redemptionNFT/vestingVault/promoStaking) moved behind
++// a single RammRegistry — see contracts/src/RammRegistry.sol.
+ const MARKET_DEPLOY_ABI = [{
+   type: "constructor",
+   inputs: [
+     { name: "_usdc",             type: "address" },
+     { name: "_pvt",              type: "address" },
+-    { name: "_rammToken",        type: "address" },
+-    { name: "_redemptionNFT",    type: "address" },
+-    { name: "_vestingVault",     type: "address" },
+-    { name: "_promoStaking",     type: "address" },
++    { name: "_registry",         type: "address" },
+     { name: "_brandWallet",      type: "address" },
+     { name: "_campaignWallet",   type: "address" },
+     { name: "_initialOwner",     type: "address" },
+@@ -196,7 +197,7 @@ async function main() {
+     const marketHash = await walletClient.deployContract({
+       abi: MARKET_DEPLOY_ABI, bytecode: marketBytecode, nonce: nonce++,
+       args: [
+-        USDC_ADDRESS, pvtAddress, RAMM_ADDRESS, NFT_ADDRESS, VAULT_ADDRESS, STAKING_ADDRESS,
++        USDC_ADDRESS, pvtAddress, REGISTRY_ADDRESS,
+         BRAND_WALLET, account.address, account.address,
+         9300, 700, 500, 200, 600, // buyBrandBps, buyCampaignBps, sellBrandBps, sellCampaignBps, promoterBps — matches Deploy.s.sol defaults
+       ],
+diff --git a/agents/src/scripts/migrateCampaignContracts.ts b/agents/src/scripts/migrateCampaignContracts.ts
+index e9abe3c..6370f28 100644
+--- a/agents/src/scripts/migrateCampaignContracts.ts
++++ b/agents/src/scripts/migrateCampaignContracts.ts
+@@ -35,6 +35,7 @@ const RAMM_ADDRESS = (process.env.RAMM_TOKEN_ADDRESS ?? "0x000000000000000000000
+ const NFT_ADDRESS = (process.env.REDEMPTION_NFT_ADDRESS ?? "0x0000000000000000000000000000000000000000") as Address
+ const VAULT_ADDRESS = (process.env.VESTING_VAULT_ADDRESS ?? "0x0000000000000000000000000000000000000000") as Address
+ const STAKING_ADDRESS = (process.env.PROMO_STAKING_ADDRESS ?? "0x0000000000000000000000000000000000000000") as Address
++const REGISTRY_ADDRESS = process.env.REGISTRY_ADDRESS as Address
+ const SEED_USDC = parseUnits("5000", 6)
+ 
+ function loadBytecode(name: string): Hex {
+@@ -53,15 +54,15 @@ const PVT_DEPLOY_ABI = [{
+   stateMutability: "nonpayable",
+ }] as const
+ 
++// Constructor shrank from 14 args to 11 when the four shared singleton
++// addresses (rammToken/redemptionNFT/vestingVault/promoStaking) moved behind
++// a single RammRegistry — see contracts/src/RammRegistry.sol.
+ const MARKET_DEPLOY_ABI = [{
+   type: "constructor",
+   inputs: [
+     { name: "_usdc", type: "address" },
+     { name: "_pvt", type: "address" },
+-    { name: "_rammToken", type: "address" },
+-    { name: "_redemptionNFT", type: "address" },
+-    { name: "_vestingVault", type: "address" },
+-    { name: "_promoStaking", type: "address" },
++    { name: "_registry", type: "address" },
+     { name: "_brandWallet", type: "address" },
+     { name: "_campaignWallet", type: "address" },
+     { name: "_initialOwner", type: "address" },
+@@ -171,7 +172,7 @@ async function main() {
+     const marketHash = await deployerWallet.deployContract({
+       abi: MARKET_DEPLOY_ABI, bytecode: marketBytecode, nonce: nonce++,
+       args: [
+-        USDC_ADDRESS, pvtAddress, RAMM_ADDRESS, NFT_ADDRESS, VAULT_ADDRESS, STAKING_ADDRESS,
++        USDC_ADDRESS, pvtAddress, REGISTRY_ADDRESS,
+         c.brandWallet, campaignWallet, deployer.address,
+         buyBrandBps, buyCampaignBps, sellBrandBps, sellCampaignBps, buyPromoterRateBps,
+       ],
+diff --git a/agents/src/valet/index.ts b/agents/src/valet/index.ts
+index 95814f1..0a01bff 100644
+--- a/agents/src/valet/index.ts
++++ b/agents/src/valet/index.ts
+@@ -45,6 +45,7 @@ const RAMM_TOKEN_ADDRESS = (process.env.RAMM_TOKEN_ADDRESS ?? "") as Address
+ const REDEMPTION_NFT_ADDRESS = (process.env.REDEMPTION_NFT_ADDRESS ?? "") as Address
+ const VESTING_VAULT_ADDRESS = (process.env.VESTING_VAULT_ADDRESS ?? "") as Address
+ const PROMO_STAKING_ADDRESS = (process.env.PROMO_STAKING_ADDRESS ?? "") as Address
++const REGISTRY_ADDRESS = (process.env.REGISTRY_ADDRESS ?? "") as Address
+ const ZERO_ADDRESS = "0x0000000000000000000000000000000000000000" as Address
+ 
+ // ─── Contract bytecodes (from compiled Foundry artifacts) ─────────────────────
+@@ -234,10 +235,7 @@ export async function createCampaign(params: CreateCampaignParams): Promise<{
+       args: [
+         USDC_ADDRESS,
+         pvtAddress,
+-        RAMM_TOKEN_ADDRESS || ZERO_ADDRESS,
+-        REDEMPTION_NFT_ADDRESS || ZERO_ADDRESS,
+-        VESTING_VAULT_ADDRESS || ZERO_ADDRESS,
+-        PROMO_STAKING_ADDRESS || ZERO_ADDRESS,
++        REGISTRY_ADDRESS || ZERO_ADDRESS,
+         params.brandWallet,
+         campaignWallet,
+         account.address,
+@@ -670,16 +668,16 @@ const DEPOSIT_LIQUIDITY_ABI = [
+   },
+ ] as const
+ 
++// Constructor shrank from 14 args to 11 when the four shared singleton
++// addresses (rammToken/redemptionNFT/vestingVault/promoStaking) moved behind
++// a single RammRegistry — see contracts/src/RammRegistry.sol.
+ const MARKET_DEPLOY_ABI = [
+   {
+     type: "constructor",
+     inputs: [
+       { name: "_usdc",              type: "address" },
+       { name: "_pvt",               type: "address" },
+-      { name: "_rammToken",         type: "address" },
+-      { name: "_redemptionNFT",     type: "address" },
+-      { name: "_vestingVault",      type: "address" },
+-      { name: "_promoStaking",      type: "address" },
++      { name: "_registry",          type: "address" },
+       { name: "_brandWallet",       type: "address" },
+       { name: "_campaignWallet",    type: "address" },
+       { name: "_initialOwner",      type: "address" },
+diff --git a/contracts/script/Deploy.s.sol b/contracts/script/Deploy.s.sol
+index 1b50f29..8ec7cfc 100644
+--- a/contracts/script/Deploy.s.sol
++++ b/contracts/script/Deploy.s.sol
+@@ -8,6 +8,7 @@ import {RAMMToken} from "../src/RAMMToken.sol";
+ import {RedemptionNFT} from "../src/RedemptionNFT.sol";
+ import {VestingVault} from "../src/VestingVault.sol";
+ import {PromoStaking} from "../src/PromoStaking.sol";
++import {RammRegistry} from "../src/RammRegistry.sol";
+ import {IMPXMarket} from "../src/IMPXMarket.sol";
+ 
+ /// @notice Deploy RAMM MVP3 contracts to Base Sepolia.
+@@ -75,6 +76,19 @@ contract Deploy is Script {
+         PromoStaking promoStaking = new PromoStaking(address(rammToken), deployer);
+         console2.log("PromoStaking: ", address(promoStaking));
+ 
++        // 4d. RammRegistry — canonical, mutable pointer to the four shared
++        // singleton contracts above. Every market stores only this registry's
++        // address as immutable; fixing any of the four later is one setX()
++        // call here, not a redeploy of every dependent market.
++        RammRegistry registry = new RammRegistry(
++            deployer,
++            address(rammToken),
++            address(redemptionNFT),
++            address(vestingVault),
++            address(promoStaking)
++        );
++        console2.log("RammRegistry: ", address(registry));
++
+         // 5. IMPXMarket — bonding curve AMM with per-campaign wallet split
+         // Default policy: buy 93/7 (6% of which is a staked promoter's
+         // referral cut, carved out of the 7% campaign share), sell deductions
+@@ -82,10 +96,7 @@ contract Deploy is Script {
+         IMPXMarket market = new IMPXMarket(
+             address(usdc),
+             address(pvt),
+-            address(rammToken),
+-            address(redemptionNFT),
+-            address(vestingVault),
+-            address(promoStaking),
++            address(registry),
+             brand,          // brandWallet
+             campaignWallet, // campaignWallet
+             deployer,       // initialOwner
+@@ -125,6 +136,7 @@ contract Deploy is Script {
+         console2.log("REDEMPTION_NFT_ADDRESS: ", address(redemptionNFT));
+         console2.log("VESTING_VAULT_ADDRESS:  ", address(vestingVault));
+         console2.log("PROMO_STAKING_ADDRESS:  ", address(promoStaking));
++        console2.log("REGISTRY_ADDRESS:       ", address(registry));
+         console2.log("MARKET_ADDRESS:         ", address(market));
+     }
+ }
+diff --git a/contracts/src/IMPXMarket.sol b/contracts/src/IMPXMarket.sol
+index 64d760f..60b1e74 100644
+--- a/contracts/src/IMPXMarket.sol
++++ b/contracts/src/IMPXMarket.sol
+@@ -11,6 +11,7 @@ import {RAMMToken} from "./RAMMToken.sol";
+ import {RedemptionNFT} from "./RedemptionNFT.sol";
+ import {VestingVault} from "./VestingVault.sol";
+ import {PromoStaking} from "./PromoStaking.sol";
++import {RammRegistry} from "./RammRegistry.sol";
+ 
+ /// @title IMPXMarket — per-campaign wallet revenue split
+ /// @notice Sigmoidal bonding curve AMM for RAMM drops.
+@@ -44,10 +45,12 @@ contract IMPXMarket is Ownable, ReentrancyGuard {
+ 
+     IERC20 public immutable usdc;
+     PVTToken public immutable pvt;
+-    RAMMToken public immutable rammToken;
+-    RedemptionNFT public immutable redemptionNFT;
+-    VestingVault public immutable vestingVault;
+-    PromoStaking public immutable promoStaking;
++
++    /// @notice Where rammToken/redemptionNFT/vestingVault/promoStaking actually
++    ///         live — looked up dynamically on every call instead of cached as
++    ///         immutables, so a fix to any of those four never requires
++    ///         redeploying this market. See RammRegistry.sol for why.
++    RammRegistry public immutable registry;
+ 
+     /// @notice Bps of actualCost routed to a staked promoter's VestingVault
+     ///         tranche on a referred buy, carved OUT of CAMPAIGN_BPS (not on
+@@ -153,10 +156,7 @@ contract IMPXMarket is Ownable, ReentrancyGuard {
+ 
+     /// @param _usdc              MockUSDC / Circle USDC
+     /// @param _pvt               PVTToken (transfer ownership to this contract after)
+-    /// @param _rammToken         RAMMToken (set this contract as minter after)
+-    /// @param _redemptionNFT     RedemptionNFT (set this contract as market after)
+-    /// @param _vestingVault      VestingVault (set this contract as market after)
+-    /// @param _promoStaking      PromoStaking (gates which referral addresses are real promoters)
++    /// @param _registry          RammRegistry — resolves rammToken/redemptionNFT/vestingVault/promoStaking
+     /// @param _brandWallet       Brand's custodial wallet
+     /// @param _campaignWallet    VALET-controlled campaign treasury wallet
+     /// @param _initialOwner      Deployer address
+@@ -169,10 +169,7 @@ contract IMPXMarket is Ownable, ReentrancyGuard {
+     constructor(
+         address _usdc,
+         address _pvt,
+-        address _rammToken,
+-        address _redemptionNFT,
+-        address _vestingVault,
+-        address _promoStaking,
++        address _registry,
+         address _brandWallet,
+         address _campaignWallet,
+         address _initialOwner,
+@@ -187,10 +184,7 @@ contract IMPXMarket is Ownable, ReentrancyGuard {
+         require(_promoterBps <= _buyCampaignBps, "promoter BPS must not exceed campaign BPS");
+         usdc = IERC20(_usdc);
+         pvt = PVTToken(_pvt);
+-        rammToken = RAMMToken(_rammToken);
+-        redemptionNFT = RedemptionNFT(_redemptionNFT);
+-        vestingVault = VestingVault(_vestingVault);
+-        promoStaking = PromoStaking(_promoStaking);
++        registry = RammRegistry(_registry);
+         brandWallet = _brandWallet;
+         campaignWallet = _campaignWallet;
+         BRAND_BPS = _buyBrandBps;
+@@ -201,6 +195,26 @@ contract IMPXMarket is Ownable, ReentrancyGuard {
+         PROMOTER_BPS = _promoterBps;
+     }
+ 
++    // ─────────────────────────────────────────────────────────────────────────
++    // Registry lookups — resolved fresh on every call, never cached
++    // ─────────────────────────────────────────────────────────────────────────
++
++    function _rammToken() internal view returns (RAMMToken) {
++        return RAMMToken(registry.rammToken());
++    }
++
++    function _redemptionNFT() internal view returns (RedemptionNFT) {
++        return RedemptionNFT(registry.redemptionNFT());
++    }
++
++    function _vestingVault() internal view returns (VestingVault) {
++        return VestingVault(registry.vestingVault());
++    }
++
++    function _promoStaking() internal view returns (PromoStaking) {
++        return PromoStaking(registry.promoStaking());
++    }
++
+     /// @notice Decodes a referral code into a promoter address. Matches the
+     ///         client's encodeReferralCode() (abi.encode(address)) — anything
+     ///         else (empty '0x', malformed input) is treated as "no referrer"
+@@ -257,7 +271,7 @@ contract IMPXMarket is Ownable, ReentrancyGuard {
+ 
+         address promoter = _decodeReferrer(referralCode);
+         uint256 promoterCut = 0;
+-        if (promoter != address(0) && promoter != msg.sender && promoStaking.isPromoter(promoter)) {
++        if (promoter != address(0) && promoter != msg.sender && _promoStaking().isPromoter(promoter)) {
+             promoterCut = (actualCost * PROMOTER_BPS) / 10_000;
+             campaignShare -= promoterCut;
+         }
+@@ -265,8 +279,9 @@ contract IMPXMarket is Ownable, ReentrancyGuard {
+         usdc.safeTransfer(brandWallet, brandShare);
+         if (campaignShare > 0) usdc.safeTransfer(campaignWallet, campaignShare);
+         if (promoterCut > 0) {
+-            usdc.safeTransfer(address(vestingVault), promoterCut);
+-            vestingVault.credit(promoter, promoterCut);
++            VestingVault vault = _vestingVault();
++            usdc.safeTransfer(address(vault), promoterCut);
++            vault.credit(promoter, promoterCut);
+             emit ReferralCredited(promoter, msg.sender, promoterCut, block.timestamp);
+         }
+ 
+@@ -284,7 +299,7 @@ contract IMPXMarket is Ownable, ReentrancyGuard {
+ 
+         // Mint RAMM reward to buyer — non-blocking (failure doesn't revert purchase)
+         uint256 rammReward = quantity * RAMM_PER_PVT;
+-        try rammToken.mint(msg.sender, rammReward) {} catch {}
++        try _rammToken().mint(msg.sender, rammReward) {} catch {}
+ 
+         emit SwapSuccess(msg.sender, quantity, actualCost, currentSupply, rammReward, block.timestamp);
+         return true;
+@@ -408,7 +423,7 @@ contract IMPXMarket is Ownable, ReentrancyGuard {
+         pvt.burnFrom(msg.sender, quantity);
+         if (currentSupply >= quantity) currentSupply -= quantity;
+ 
+-        nftTokenId = redemptionNFT.mint(msg.sender, address(pvt), pvt.productName(), quantity);
++        nftTokenId = _redemptionNFT().mint(msg.sender, address(pvt), pvt.productName(), quantity);
+ 
+         emit RedeemSuccess(msg.sender, quantity, currentSupply, nftTokenId, block.timestamp);
+     }
+diff --git a/contracts/src/RammRegistry.sol b/contracts/src/RammRegistry.sol
+new file mode 100644
+index 0000000..e65697b
+--- /dev/null
++++ b/contracts/src/RammRegistry.sol
+@@ -0,0 +1,78 @@
++// SPDX-License-Identifier: MIT
++pragma solidity ^0.8.23;
++
++import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
++
++/// @title RammRegistry
++/// @notice Single canonical source of truth for the four shared, platform-wide
++///         singleton contracts every IMPXMarket depends on. Markets store only
++///         this registry's address as `immutable` — never the shared contracts'
++///         addresses directly — and look them up dynamically on every call.
++///
++/// Why this exists: before this contract, every IMPXMarket stored `RAMMToken`,
++/// `RedemptionNFT`, `VestingVault`, and `PromoStaking` as `immutable` fields set
++/// at construction. Fixing a bug in any one of those four meant deploying a new
++/// version AND redeploying every single market that referenced the old address
++/// — on testnet, an annoying but free operation (already done twice this
++/// project); on mainnet, it would mean stranding real user funds and positions
++/// on markets that can never be pointed at the fix. With this registry, rolling
++/// out a fix is one `setX()` call — every market, old and new, picks up the new
++/// address on its very next call, no redeploy.
++///
++/// USDC and each market's own PVTToken are deliberately NOT in here — USDC is
++/// an external, essentially-immutable dependency (the one-time mock-to-real
++/// swap is a distinct migration, not an ongoing "fix and redeploy" problem),
++/// and PVTToken is already per-market/per-product, not a shared singleton.
++contract RammRegistry is Ownable {
++    address public rammToken;
++    address public redemptionNFT;
++    address public vestingVault;
++    address public promoStaking;
++
++    event RammTokenUpdated(address indexed oldAddr, address indexed newAddr);
++    event RedemptionNFTUpdated(address indexed oldAddr, address indexed newAddr);
++    event VestingVaultUpdated(address indexed oldAddr, address indexed newAddr);
++    event PromoStakingUpdated(address indexed oldAddr, address indexed newAddr);
++
++    error ZeroAddress();
++
++    constructor(
++        address _initialOwner,
++        address _rammToken,
++        address _redemptionNFT,
++        address _vestingVault,
++        address _promoStaking
++    ) Ownable(_initialOwner) {
++        if (_rammToken == address(0) || _redemptionNFT == address(0) || _vestingVault == address(0) || _promoStaking == address(0)) {
++            revert ZeroAddress();
++        }
++        rammToken = _rammToken;
++        redemptionNFT = _redemptionNFT;
++        vestingVault = _vestingVault;
++        promoStaking = _promoStaking;
++    }
++
++    function setRammToken(address addr) external onlyOwner {
++        if (addr == address(0)) revert ZeroAddress();
++        emit RammTokenUpdated(rammToken, addr);
++        rammToken = addr;
++    }
++
++    function setRedemptionNFT(address addr) external onlyOwner {
++        if (addr == address(0)) revert ZeroAddress();
++        emit RedemptionNFTUpdated(redemptionNFT, addr);
++        redemptionNFT = addr;
++    }
++
++    function setVestingVault(address addr) external onlyOwner {
++        if (addr == address(0)) revert ZeroAddress();
++        emit VestingVaultUpdated(vestingVault, addr);
++        vestingVault = addr;
++    }
++
++    function setPromoStaking(address addr) external onlyOwner {
++        if (addr == address(0)) revert ZeroAddress();
++        emit PromoStakingUpdated(promoStaking, addr);
++        promoStaking = addr;
++    }
++}
+diff --git a/contracts/test/POPZ.t.sol b/contracts/test/POPZ.t.sol
+index bec9998..79cc2af 100644
+--- a/contracts/test/POPZ.t.sol
++++ b/contracts/test/POPZ.t.sol
+@@ -9,6 +9,7 @@ import {RedemptionNFT} from "../src/RedemptionNFT.sol";
+ import {IMPXMarket} from "../src/IMPXMarket.sol";
+ import {PromoStaking} from "../src/PromoStaking.sol";
+ import {VestingVault} from "../src/VestingVault.sol";
++import {RammRegistry} from "../src/RammRegistry.sol";
+ import {SigmoidMath} from "../src/SigmoidMath.sol";
+ 
+ contract POPZTest is Test {
+@@ -19,6 +20,7 @@ contract POPZTest is Test {
+     IMPXMarket public market;
+     PromoStaking public promoStaking;
+     VestingVault public vestingVault;
++    RammRegistry public registry;
+ 
+     address public deployer        = makeAddr("deployer");
+     address public buyer           = makeAddr("buyer");
+@@ -43,14 +45,18 @@ contract POPZTest is Test {
+         redemptionNFT = new RedemptionNFT(deployer);
+         promoStaking  = new PromoStaking(address(rammToken), deployer);
+         vestingVault  = new VestingVault(address(usdc), deployer);
++        registry      = new RammRegistry(
++            deployer,
++            address(rammToken),
++            address(redemptionNFT),
++            address(vestingVault),
++            address(promoStaking)
++        );
+ 
+         market = new IMPXMarket(
+             address(usdc),
+             address(pvt),
+-            address(rammToken),
+-            address(redemptionNFT),
+-            address(vestingVault),
+-            address(promoStaking),
++            address(registry),
+             brand,
+             campaignWallet,
+             deployer,
+@@ -824,4 +830,57 @@ contract POPZTest is Test {
+ 
+         assertEq(usdc.balanceOf(buyer), buyerUsdcBeforeRedeem, "redeem moves no USDC");
+     }
++
++    // ─────────────────────────────────────────────────────────────────────────
++    // RammRegistry — the whole point: fixing a shared contract is one setX()
++    // call, never a market redeploy.
++    // ─────────────────────────────────────────────────────────────────────────
++
++    function test_Registry_SwapVestingVault_NoMarketRedeployNeeded() public {
++        _stakePromoter();
++
++        // Deploy a *replacement* VestingVault — simulating the fulfillment-
++        // gating fix (or any future vault change) shipping — and point the
++        // existing, already-deployed `market` at it via the registry. The
++        // market contract itself is never touched or redeployed.
++        vm.prank(deployer);
++        VestingVault newVault = new VestingVault(address(usdc), deployer);
++        vm.prank(deployer);
++        newVault.setMarketAuthorized(address(market), true);
++        vm.prank(deployer);
++        registry.setVestingVault(address(newVault));
++
++        assertEq(address(market.registry()), address(registry), "sanity: market still points at the same registry");
++        assertEq(registry.vestingVault(), address(newVault), "registry now points at the new vault");
++
++        bytes memory referralCode = abi.encode(promoter);
++        uint256 quote = market.getQuote(1);
++        vm.startPrank(buyer);
++        usdc.approve(address(market), quote);
++        market.swapUSDCForPVT(address(pvt), 1, quote, referralCode);
++        vm.stopPrank();
++
++        uint256 promoterCut = (quote * market.PROMOTER_BPS()) / 10_000;
++        (, uint256 lockedOld) = vestingVault.balanceOf(promoter);
++        (, uint256 lockedNew) = newVault.balanceOf(promoter);
++        assertEq(lockedOld, 0, "old vault got nothing - market never touches it once registry moves on");
++        assertEq(lockedNew, promoterCut, "new vault got the credit, with zero changes to the market contract");
++    }
++
++    function test_Registry_OnlyOwnerCanUpdate() public {
++        vm.prank(buyer); // not the registry owner
++        vm.expectRevert();
++        registry.setVestingVault(address(0xBEEF));
++    }
++
++    function test_Registry_RejectsZeroAddress() public {
++        vm.prank(deployer);
++        vm.expectRevert(RammRegistry.ZeroAddress.selector);
++        registry.setVestingVault(address(0));
++    }
++
++    function test_Registry_ConstructorRejectsZeroAddress() public {
++        vm.expectRevert(RammRegistry.ZeroAddress.selector);
++        new RammRegistry(deployer, address(0), address(redemptionNFT), address(vestingVault), address(promoStaking));
++    }
+ }

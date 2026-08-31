@@ -1,0 +1,80 @@
+[
+  {
+    "campaignId": "bb34e233-5a07-404a-9f12-3bd34ab0c901",
+    "productName": "Sneakers Air",
+    "pvtAddress": "0x6f45edb211361bdfe259b1598ea89185ec3ad458",
+    "marketAddress": "0x2ad07ab0811fcb7ecc00e9d0e9b144938e203830"
+  },
+  {
+    "campaignId": "f9e04352-109c-4632-9aaf-62793062feb2",
+    "productName": "Sneakers Fly",
+    "pvtAddress": "0x31dca6e1215f74bc36285c0263fba9c35d05e9f9",
+    "marketAddress": "0xe2ad071a0708528b21e7206e9e48c525563dae6c"
+  },
+  {
+    "campaignId": "a5fa06a1-91a8-4fdf-a4a9-d96c5ed0221e",
+    "productName": "Sneaker II",
+    "pvtAddress": "0xf121d1c9743cd47ca168f6d50d99be965c8a14d9",
+    "marketAddress": "0x6b259a6b7655358617a199adb1476c4d4efdc4ad"
+  },
+  {
+    "campaignId": "1cbd0a0e-079d-41ce-a52d-7a764a001723",
+    "productName": "Sneakers I",
+    "pvtAddress": "0x9357045f4ee03c7e610a19ffe9a1a60ddede6bdc",
+    "marketAddress": "0x082dc12885671c593de7ca101213379fbffdcbec"
+  },
+  {
+    "campaignId": "c445d79c-d97f-4acd-a230-a1d7ac4f58a7",
+    "productName": "Sneakers women",
+    "pvtAddress": "0x606afff9e16e9a7776407d2786576e7a420fd80e",
+    "marketAddress": "0x670356437e0a48c4065ee6e5a8114bd4e46829b0"
+  },
+  {
+    "campaignId": "0f9c5a47-812c-4811-96ae-7e8f03ef7da7",
+    "productName": "SN Women II",
+    "pvtAddress": "0x77571ac2a0ad90c177984d9389fafbb75895df1f",
+    "marketAddress": "0x234a6923f0d8578cb3585e71af04f18aba98e0e4"
+  },
+  {
+    "campaignId": "f04d06e4-b732-4f2f-85b4-7801c47a7e12",
+    "productName": "Nike Air Force 1 '07 Premium \"Flowers\" Women's Shoes",
+    "pvtAddress": "0xb28b9c3184a02a10a02a3cc5c1542a5012f705db",
+    "marketAddress": "0x0937da7951d72291b6f4d7949d7d81ebf648bfdf"
+  },
+  {
+    "campaignId": "2f5c65ff-fb8c-43f3-83d2-20c1c9e907d7",
+    "productName": "Nike V5 RNR Women's Shoes with Reflective Accents",
+    "pvtAddress": "0x4bdd97d1d81d8f31bf02278958b03536d126bc7b",
+    "marketAddress": "0xc93184624907a008ea412bb97d025decdf211902"
+  },
+  {
+    "campaignId": "bfe99f03-eb8c-446d-a23a-37d93616cf41",
+    "productName": "Nike Free Metcon 7 AMP Men's Training Shoes",
+    "pvtAddress": "0xcd2bcb140405f1249dd3ca160a48f62627cc24fa",
+    "marketAddress": "0xfbd0ffcf273fce940714e6c726771a0b8cc8ccc7"
+  },
+  {
+    "campaignId": "28fd8fbe-730e-4e6f-96ff-7683f28962ff",
+    "productName": "Nike SB React Leo Skate Shoes",
+    "pvtAddress": "0xbe34434796911faf19220fc1a761474cb6469616",
+    "marketAddress": "0x0cbdba20d7c28766e51f316ca9d39d20078a37d0"
+  },
+  {
+    "campaignId": "68973703-0256-45cf-baad-e40b1d3349b8",
+    "productName": "Luka 77 Basketball Shoes",
+    "pvtAddress": "0x4c54e98a1436865bacc64753aa83efa82c0e3768",
+    "marketAddress": "0xf5ea30f4728800448e966590ef498ace7701fa56"
+  },
+  {
+    "campaignId": "e5ba2dbc-10e7-4fe3-a6ca-0ae325eff302",
+    "productName": "Nike Air Force 1 '07 \"Floral\" Women's Shoes",
+    "pvtAddress": "0x9e3aee33f8d8d3fb6b96e9815cc2b9411376477c",
+    "marketAddress": "0xb7da33abc44abd22e2b8dc5fa1ff2dcdebf4b37d"
+  },
+  {
+    "campaignId": "61e0367a-dacf-4caa-b256-859600015a7e",
+    "productName": "Nike GP Challenge 1.5 Women's Hard Court Tennis Shoes",
+    "pvtAddress": "0x4f1dd3ca6311ea54bddf619f7121124d946fc8a3",
+    "marketAddress": "0x844911e21c5d1e950ef705e4e91c1a3b0cda50c7"
+  }
+]
