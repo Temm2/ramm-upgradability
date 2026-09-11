@@ -1,16 +1,15 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.23;
 
-import {ERC1155} from "@openzeppelin/contracts/token/ERC1155/ERC1155.sol";
-import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
-import {Initializable} from "@openzeppelin/contracts/proxy/utils/Initializable.sol";
+import {ERC1155Upgradeable} from "@openzeppelin/contracts-upgradeable/token/ERC1155/ERC1155Upgradeable.sol";
+import {OwnableUpgradeable} from "@openzeppelin/contracts-upgradeable/access/OwnableUpgradeable.sol";
 import {UUPSUpgradeable} from "@openzeppelin/contracts/proxy/utils/UUPSUpgradeable.sol";
 import {Strings} from "@openzeppelin/contracts/utils/Strings.sol";
 import {Base64} from "@openzeppelin/contracts/utils/Base64.sol";
 
 /// @title RedemptionNFTUpgradeable
 /// @notice Upgradeable ERC-1155 order receipt contract behind UUPS proxy.
-contract RedemptionNFTUpgradeable is ERC1155, Ownable, Initializable, UUPSUpgradeable {
+contract RedemptionNFTUpgradeable is ERC1155Upgradeable, OwnableUpgradeable, UUPSUpgradeable {
     using Strings for uint256;
 
     struct RedemptionData {
@@ -45,12 +44,13 @@ contract RedemptionNFTUpgradeable is ERC1155, Ownable, Initializable, UUPSUpgrad
     }
 
     /// @custom:oz-upgrades-unsafe-allow constructor
-    constructor() ERC1155("") Ownable(msg.sender) {
+    constructor() {
         _disableInitializers();
     }
 
     function initialize(address initialOwner) external initializer {
-        _transferOwnership(initialOwner);
+        __ERC1155_init("");
+        __Ownable_init(initialOwner);
     }
 
     function setMarketAuthorized(address _market, bool _authorized) external onlyOwner {

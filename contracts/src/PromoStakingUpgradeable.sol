@@ -3,14 +3,16 @@ pragma solidity ^0.8.23;
 
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
-import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
+import {OwnableUpgradeable} from "@openzeppelin/contracts-upgradeable/access/OwnableUpgradeable.sol";
 import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
-import {Initializable} from "@openzeppelin/contracts/proxy/utils/Initializable.sol";
 import {UUPSUpgradeable} from "@openzeppelin/contracts/proxy/utils/UUPSUpgradeable.sol";
 
 /// @title PromoStakingUpgradeable
 /// @notice Upgradeable RAMM promoter staking gate contract behind UUPS proxy.
-contract PromoStakingUpgradeable is Ownable, ReentrancyGuard, Initializable, UUPSUpgradeable {
+/// @dev ReentrancyGuard, not ReentrancyGuardUpgradeable — see the note in
+///      VestingVaultUpgradeable.sol; there is no separate upgradeable variant
+///      in this OZ version, and using the plain one is OZ's own current practice.
+contract PromoStakingUpgradeable is OwnableUpgradeable, ReentrancyGuard, UUPSUpgradeable {
     using SafeERC20 for IERC20;
 
     IERC20 public rammToken;
@@ -37,12 +39,12 @@ contract PromoStakingUpgradeable is Ownable, ReentrancyGuard, Initializable, UUP
     error StillLocked(uint256 unlocksAt, uint256 currentTime);
 
     /// @custom:oz-upgrades-unsafe-allow constructor
-    constructor() Ownable(msg.sender) {
+    constructor() {
         _disableInitializers();
     }
 
     function initialize(address _rammToken, address _initialOwner) external initializer {
-        _transferOwnership(_initialOwner);
+        __Ownable_init(_initialOwner);
         rammToken = IERC20(_rammToken);
         minStake = 1_000 * 1e18;
         lockPeriod = 7 days;

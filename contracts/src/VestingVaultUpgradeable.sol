@@ -3,9 +3,8 @@ pragma solidity ^0.8.23;
 
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
-import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
+import {OwnableUpgradeable} from "@openzeppelin/contracts-upgradeable/access/OwnableUpgradeable.sol";
 import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
-import {Initializable} from "@openzeppelin/contracts/proxy/utils/Initializable.sol";
 import {UUPSUpgradeable} from "@openzeppelin/contracts/proxy/utils/UUPSUpgradeable.sol";
 
 interface IBrandWallet {
@@ -14,7 +13,11 @@ interface IBrandWallet {
 
 /// @title VestingVaultUpgradeable
 /// @notice Upgradeable time-locked promoter reward escrow vault behind UUPS proxy.
-contract VestingVaultUpgradeable is Ownable, ReentrancyGuard, Initializable, UUPSUpgradeable {
+/// @dev ReentrancyGuard (not ReentrancyGuardUpgradeable) is correct here — as of
+///      OZ v5.5, ReentrancyGuard itself uses a namespaced storage slot and OZ's
+///      own upgradeable mocks import it directly; there is no separate
+///      ReentrancyGuardUpgradeable in this OZ version.
+contract VestingVaultUpgradeable is OwnableUpgradeable, ReentrancyGuard, UUPSUpgradeable {
     using SafeERC20 for IERC20;
 
     IERC20 public usdc;
@@ -48,12 +51,12 @@ contract VestingVaultUpgradeable is Ownable, ReentrancyGuard, Initializable, UUP
     error InvalidTranche();
 
     /// @custom:oz-upgrades-unsafe-allow constructor
-    constructor() Ownable(msg.sender) {
+    constructor() {
         _disableInitializers();
     }
 
     function initialize(address _usdc, address _initialOwner) external initializer {
-        _transferOwnership(_initialOwner);
+        __Ownable_init(_initialOwner);
         usdc = IERC20(_usdc);
         vestingPeriod = 7 days;
     }

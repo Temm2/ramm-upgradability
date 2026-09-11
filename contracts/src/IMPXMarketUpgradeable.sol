@@ -3,9 +3,8 @@ pragma solidity ^0.8.23;
 
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
-import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
+import {OwnableUpgradeable} from "@openzeppelin/contracts-upgradeable/access/OwnableUpgradeable.sol";
 import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
-import {Initializable} from "@openzeppelin/contracts/proxy/utils/Initializable.sol";
 import {PVTToken} from "./PVTToken.sol";
 import {SigmoidMath} from "./SigmoidMath.sol";
 import {RAMMToken} from "./RAMMToken.sol";
@@ -15,7 +14,12 @@ import {PromoStaking} from "./PromoStaking.sol";
 import {RammRegistry} from "./RammRegistry.sol";
 
 /// @title IMPXMarketUpgradeable — Per-campaign bonding curve market compatible with BeaconProxy and ERC1967Proxy.
-contract IMPXMarketUpgradeable is Ownable, ReentrancyGuard, Initializable {
+/// @dev No UUPSUpgradeable/_authorizeUpgrade here — correct for the Beacon Proxy
+///      pattern this is meant to be deployed behind: upgrade authority lives in
+///      the shared UpgradeableBeacon, not in each market's own implementation.
+///      ReentrancyGuard (not ReentrancyGuardUpgradeable) — see the note in
+///      VestingVaultUpgradeable.sol.
+contract IMPXMarketUpgradeable is OwnableUpgradeable, ReentrancyGuard {
     using SafeERC20 for IERC20;
     using SigmoidMath for uint256;
 
@@ -102,7 +106,7 @@ contract IMPXMarketUpgradeable is Ownable, ReentrancyGuard, Initializable {
     error NoRevenue();
 
     /// @custom:oz-upgrades-unsafe-allow constructor
-    constructor() Ownable(msg.sender) {
+    constructor() {
         _disableInitializers();
     }
 
@@ -125,7 +129,7 @@ contract IMPXMarketUpgradeable is Ownable, ReentrancyGuard, Initializable {
         require(_promoterBps <= _buyCampaignBps, "promoter BPS must not exceed campaign BPS");
         require(_curve.b > 0 && _curve.c > 0 && _curve.p > 0, "curve params must be non-zero");
 
-        _transferOwnership(_initialOwner);
+        __Ownable_init(_initialOwner);
         usdc = IERC20(_usdc);
         pvt = PVTToken(_pvt);
         registry = RammRegistry(_registry);

@@ -1,14 +1,13 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.23;
 
-import {ERC20} from "@openzeppelin/contracts/token/ERC20/ERC20.sol";
-import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
-import {Initializable} from "@openzeppelin/contracts/proxy/utils/Initializable.sol";
+import {ERC20Upgradeable} from "@openzeppelin/contracts-upgradeable/token/ERC20/ERC20Upgradeable.sol";
+import {OwnableUpgradeable} from "@openzeppelin/contracts-upgradeable/access/OwnableUpgradeable.sol";
 import {UUPSUpgradeable} from "@openzeppelin/contracts/proxy/utils/UUPSUpgradeable.sol";
 
 /// @title PVTTokenUpgradeable
 /// @notice Product Voucher Token (0 decimals) compatible with BeaconProxy and UUPS upgradeable proxies.
-contract PVTTokenUpgradeable is ERC20, Ownable, Initializable, UUPSUpgradeable {
+contract PVTTokenUpgradeable is ERC20Upgradeable, OwnableUpgradeable, UUPSUpgradeable {
     string public productName;
     uint256 public supplyCap;
     uint256 public totalMinted;
@@ -22,7 +21,7 @@ contract PVTTokenUpgradeable is ERC20, Ownable, Initializable, UUPSUpgradeable {
     error InsufficientBalance(uint256 requested, uint256 available);
 
     /// @custom:oz-upgrades-unsafe-allow constructor
-    constructor() ERC20("PVT", "PVT") Ownable(msg.sender) {
+    constructor() {
         _disableInitializers();
     }
 
@@ -32,7 +31,14 @@ contract PVTTokenUpgradeable is ERC20, Ownable, Initializable, UUPSUpgradeable {
         uint256 _supplyCap,
         address _initialOwner
     ) external initializer {
-        _transferOwnership(_initialOwner);
+        // Matches the real PVTToken.sol: ERC20(_productName, _symbol) — the
+        // token's ERC20 name IS the product name (e.g. "Agatha by Elmira
+        // Medins"), not a generic literal. The original constructor here
+        // hardcoded ERC20("PVT", "PVT") — every proxy would have shared that
+        // same wrong name/symbol AND, before this fix, an empty one (see
+        // below) regardless of what _productName/_symbol were passed.
+        __ERC20_init(_productName, _symbol);
+        __Ownable_init(_initialOwner);
         productName = _productName;
         supplyCap = _supplyCap;
     }

@@ -1,14 +1,13 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.23;
 
-import {ERC20} from "@openzeppelin/contracts/token/ERC20/ERC20.sol";
-import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
-import {Initializable} from "@openzeppelin/contracts/proxy/utils/Initializable.sol";
+import {ERC20Upgradeable} from "@openzeppelin/contracts-upgradeable/token/ERC20/ERC20Upgradeable.sol";
+import {OwnableUpgradeable} from "@openzeppelin/contracts-upgradeable/access/OwnableUpgradeable.sol";
 import {UUPSUpgradeable} from "@openzeppelin/contracts/proxy/utils/UUPSUpgradeable.sol";
 
 /// @title RAMMTokenUpgradeable
 /// @notice Upgradeable version of RAMMToken platform reward token behind UUPS proxy.
-contract RAMMTokenUpgradeable is ERC20, Ownable, Initializable, UUPSUpgradeable {
+contract RAMMTokenUpgradeable is ERC20Upgradeable, OwnableUpgradeable, UUPSUpgradeable {
     uint256 public constant MAX_SUPPLY = 1_000_000_000 * 1e18;
     uint256 public totalMinted;
 
@@ -28,12 +27,13 @@ contract RAMMTokenUpgradeable is ERC20, Ownable, Initializable, UUPSUpgradeable 
     }
 
     /// @custom:oz-upgrades-unsafe-allow constructor
-    constructor() ERC20("RAMM", "RAMM") Ownable(msg.sender) {
+    constructor() {
         _disableInitializers();
     }
 
     function initialize(address initialOwner) external initializer {
-        _transferOwnership(initialOwner);
+        __ERC20_init("RAMM", "RAMM");
+        __Ownable_init(initialOwner);
     }
 
     function setMinterAuthorized(address _minter, bool _authorized) external onlyOwner {

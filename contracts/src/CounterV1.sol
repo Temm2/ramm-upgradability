@@ -1,26 +1,25 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.23;
 
-import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
-import {Initializable} from "@openzeppelin/contracts/proxy/utils/Initializable.sol";
+import {OwnableUpgradeable} from "@openzeppelin/contracts-upgradeable/access/OwnableUpgradeable.sol";
 import {UUPSUpgradeable} from "@openzeppelin/contracts/proxy/utils/UUPSUpgradeable.sol";
 
 /// @title CounterV1
 /// @notice Toy UUPS upgradeable contract to demonstrate storage preservation and upgrade mechanics in isolation.
-contract CounterV1 is Ownable, Initializable, UUPSUpgradeable {
+contract CounterV1 is OwnableUpgradeable, UUPSUpgradeable {
     uint256 public count;
 
     /// @notice Reserved storage slots for future upgradeable state variables
     uint256[50] private __gap;
 
     /// @custom:oz-upgrades-unsafe-allow constructor
-    constructor() Ownable(msg.sender) {
+    constructor() {
         _disableInitializers();
     }
 
     /// @notice Initializer replacing constructor for proxy deployment
     function initialize(address initialOwner, uint256 _initialCount) external initializer {
-        _transferOwnership(initialOwner);
+        __Ownable_init(initialOwner);
         count = _initialCount;
     }
 
