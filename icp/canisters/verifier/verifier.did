@@ -1,0 +1,17 @@
+type VerificationResult = record {
+  is_verified : bool;
+  token_id : nat64;
+  redeemer : text;
+  product : text;
+  quantity : nat64;
+  timestamp : nat64;
+  product_name : text;
+  status : text;
+  status_code : text;
+  message : text;
+};
+
+service : {
+  "verify_redemption" : (chain_id : nat64, contract_address : text, token_id : nat64) -> (VerificationResult);
+  "health_check" : () -> (text) query;
+}

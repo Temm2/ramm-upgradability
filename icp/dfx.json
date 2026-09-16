@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "canisters": {
+    "evm_rpc": {
+      "type": "custom",
+      "candid": "https://github.com/dfinity/evm-rpc-canister/releases/latest/download/evm_rpc.did",
+      "wasm": "https://github.com/dfinity/evm-rpc-canister/releases/latest/download/evm_rpc.wasm.gz",
+      "remote": {
+        "id": {
+          "ic": "7hfb6-caaaa-aaaar-qadqq-cai"
+        }
+      }
+    },
+    "verifier": {
+      "type": "motoko",
+      "main": "canisters/verifier/main.mo",
+      "candid": "canisters/verifier/verifier.did"
+    },
+    "assets": {
+      "type": "assets",
+      "source": [
+        "canisters/assets/assets"
+      ]
+    }
+  },
+  "defaults": {
+    "build": {
+      "args": "",
+      "packpings": []
+    }
+  }
+}

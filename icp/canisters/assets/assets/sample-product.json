@@ -1,0 +1,13 @@
+{
+  "product_id": "0xe7b713328896fb709fccfbe7c2def4ac21c1400b",
+  "name": "Agatha Designer Product Voucher V1",
+  "description": "Exclusive liquid retail voucher token redeemable for Agatha Physical Product on POPUPz marketplace.",
+  "image_url": "/assets/agatha.jpg",
+  "base_price_usdc": 45.00,
+  "dpp_standard": "EU-ESPR-DPP-v0.1",
+  "sustainability": {
+    "recyclability": "100%",
+    "origin": "EU Certified",
+    "carbon_footprint": "0.45kg CO2e"
+  }
+}
